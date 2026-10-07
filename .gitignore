@@ -3,3 +3,16 @@ data/*
 __pycache__/
 *.pyc
 .DS_Store
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+private/
+local-tests/
+site-data/
+*.opensociometry.json
+build/
+dist/
+release-stage/
+*.spec
+OpenSociometry-v*.zip
