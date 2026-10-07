@@ -75,9 +75,12 @@ def upload(asset):
     endpoint = f"https://api.github.com/repos/{repository}/releases/tags/{VERSION}"
     with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers)) as response:
         release = json.load(response)
-    if any(item["name"] == asset.name for item in release["assets"]):
-        print("Already uploaded:", asset.name)
-        return
+    existing = next((item for item in release["assets"] if item["name"] == asset.name), None)
+    if existing:
+        delete = urllib.request.Request(existing["url"], method="DELETE", headers=headers)
+        with urllib.request.urlopen(delete) as response:
+            if response.status != 204:
+                raise RuntimeError("Unable to replace an earlier release asset")
     upload_url = release["upload_url"].split("{", 1)[0]
     url = upload_url + "?" + urllib.parse.urlencode({"name": asset.name})
     request = urllib.request.Request(url, data=asset.read_bytes(), method="POST",
