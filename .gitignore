@@ -11,3 +11,8 @@ private/
 local-tests/
 site-data/
 *.opensociometry.json
+build/
+dist/
+release-stage/
+*.spec
+OpenSociometry-v*.zip

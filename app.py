@@ -24,8 +24,15 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, "static")
+def app_paths():
+    source_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable)), getattr(sys, "_MEIPASS", source_dir)
+    return source_dir, source_dir
+
+
+BASE_DIR, RESOURCE_DIR = app_paths()
+STATIC_DIR = os.path.join(RESOURCE_DIR, "static")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.environ.get("SOCIOMETRY_DB", os.path.join(DATA_DIR, "sociometry.db"))
 HOST = "127.0.0.1"
