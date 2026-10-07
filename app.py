@@ -17,6 +17,7 @@ import threading
 import webbrowser
 import zipfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -68,11 +69,16 @@ def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+@contextmanager
 def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -362,10 +368,22 @@ def read_xlsx(raw):
 
 
 def read_table(filename, raw):
-    if filename.lower().endswith(".xlsx"):
+    ext = os.path.splitext(filename.lower())[1]
+    if ext == ".xlsx":
         return read_xlsx(raw)
-    if filename.lower().endswith(".xls"):
-        raise ApiError("Старый формат .xls не поддерживается — сохраните файл как .xlsx или .csv")
+    if ext == ".xls":
+        from vendor import xlrd
+        try:
+            book = xlrd.open_workbook(file_contents=raw)
+            sheet = book.sheet_by_index(0)
+            def cell_string(value):
+                return str(int(value)) if isinstance(value, float) and value.is_integer() else str(value or "")
+            return [[cell_string(sheet.cell_value(r, c)) for c in range(sheet.ncols)]
+                    for r in range(sheet.nrows)]
+        except (xlrd.XLRDError, IndexError, ValueError) as e:
+            raise ApiError("Не удалось прочитать файл .xls: %s" % e)
+    if ext not in (".csv", ".txt"):
+        raise ApiError("Неподдерживаемый формат файла. Используйте XLS, XLSX или CSV")
     for enc in ("utf-8-sig", "cp1251"):
         try:
             text = raw.decode(enc)
@@ -388,25 +406,54 @@ def parse_mark(v):
     return None
 
 
-def import_file(conn, study_id, criterion_id, filename, raw):
+def import_file(conn, study_id, criterion_id, filename, raw, mode="auto"):
     table = [[(c or "").strip() for c in r] for r in read_table(filename, raw)]
     table = [r for r in table if any(r)]
     if not table:
         raise ApiError("Файл пустой")
+    if mode not in ("auto", "members", "matrix"):
+        raise ApiError("Неверный режим импорта")
     header = table[0]
     names_in_cols = [h for h in header[1:] if h]
-    is_matrix = len(names_in_cols) >= 2 and len(table) >= 3 and \
-        set(n.lower() for n in names_in_cols) & set(r[0].lower() for r in table[1:] if r)
+    is_matrix = mode == "matrix" or (mode == "auto" and len(names_in_cols) >= 2
+        and len(table) >= 3 and set(n.lower() for n in names_in_cols)
+        == set(r[0].lower() for r in table[1:] if r))
     existing = {m["name"].lower(): m["id"] for m in get_study(conn, study_id)["members"]}
     if not is_matrix:
-        names = [r[0] for r in table if r and r[0]]
-        if names and names[0].lower() in ("фио", "имя", "участник", "участники", "name"):
+        numbered = len(header) >= 2 and header[0].lower().strip(". ") in ("№", "номер", "n", "no")
+        if not numbered and len(table) > 1:
+            numbered = all(len(r) >= 2 and r[0].strip().isdigit() for r in table[1:])
+        names = [r[1] if numbered and len(r) > 1 else r[0] for r in table if r]
+        if names and names[0].lower() in ("фио", "ф.и.о.", "имя", "участник", "участники", "name", "№"):
             names = names[1:]
-        names = [x for x in names if x.lower() not in existing]
+        names = [x for x in names if x]
+        lowered = [x.casefold() for x in names]
+        if len(lowered) != len(set(lowered)):
+            raise ApiError("В файле повторяются имена участников")
+        names = [x for x in names if x.casefold() not in existing]
         return dict(mode="members", added=add_members(conn, study_id, names))
     # матрица выборов: строки — кто выбирает, столбцы — кого выбирают
-    all_names = list(dict.fromkeys(names_in_cols + [r[0] for r in table[1:] if r and r[0]]))
-    new = [x for x in all_names if x.lower() not in existing]
+    row_names = [r[0] for r in table[1:] if r and r[0]]
+    col_keys = [x.casefold() for x in names_in_cols]
+    row_keys = [x.casefold() for x in row_names]
+    if len(names_in_cols) < 2 or len(col_keys) != len(set(col_keys)) or len(row_keys) != len(set(row_keys)):
+        raise ApiError("В матрице мало участников или повторяются имена")
+    if set(col_keys) != set(row_keys):
+        raise ApiError("Имена в строках и столбцах матрицы должны совпадать")
+    marks = []
+    for row in table[1:]:
+        if not row or not row[0]:
+            continue
+        for col, target in enumerate(header[1:], 1):
+            if not target:
+                continue
+            value = row[col] if col < len(row) else ""
+            kind = parse_mark(value)
+            if value and kind is None:
+                raise ApiError("Неизвестный выбор «%s» для %s → %s" % (value, row[0], target))
+            if kind and row[0].casefold() != target.casefold():
+                marks.append((row[0].casefold(), target.casefold(), kind))
+    new = [x for x in names_in_cols if x.casefold() not in existing]
     add_members(conn, study_id, new)
     existing = {m["name"].lower(): m["id"] for m in get_study(conn, study_id)["members"]}
     if not criterion_id:
@@ -418,20 +465,18 @@ def import_file(conn, study_id, criterion_id, filename, raw):
             criterion_id = crits[0]["id"]
     if not criterion_id:
         criterion_id = add_criterion(conn, study_id, os.path.splitext(filename)[0])
-    count = 0
-    for r in table[1:]:
-        if not r or not r[0]:
-            continue
-        a = existing[r[0].lower()]
-        for col, h in enumerate(header[1:], 1):
-            if not h or col >= len(r):
-                continue
-            kind = parse_mark(r[col])
-            b = existing[h.lower()]
-            if kind and a != b:
-                set_choice(conn, dict(criterion_id=criterion_id, from_id=a, to_id=b, kind=kind))
-                count += 1
-    return dict(mode="matrix", added=len(new), choices=count, criterion_id=criterion_id)
+    if study_of_criterion(conn, criterion_id) != study_id:
+        raise ApiError("Критерий не принадлежит этой социометрии")
+    for source, target, kind in marks:
+        set_choice(conn, dict(criterion_id=criterion_id, from_id=existing[source],
+                              to_id=existing[target], kind=kind))
+    return dict(mode="matrix", added=len(new), choices=len(marks), criterion_id=criterion_id)
+
+
+def create_study_from_file(conn, data, filename, raw, mode="auto"):
+    sid = create_study(conn, data)
+    result = import_file(conn, sid, None, filename, raw, mode)
+    return dict(id=sid, **result)
 
 
 def parse_multipart(content_type, body):
@@ -612,6 +657,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json([dict(r) for r in rows])
         if p == ["studies"] and method == "POST":
             return self.send_json({"id": create_study(conn, self.json_body())})
+        if p == ["studies", "import"] and method == "POST":
+            fields, files = parse_multipart(self.headers.get("Content-Type"), self.body())
+            if "file" not in files:
+                raise ApiError("Файл не выбран")
+            fn, raw = files["file"]
+            data = json.loads(fields.get("study", "{}"))
+            return self.send_json(create_study_from_file(conn, data, fn, raw,
+                                                         fields.get("mode", "auto")))
         if p == ["demo"] and method == "POST":
             return self.send_json({"id": create_demo(conn)})
         if p == ["restore"] and method == "POST":
@@ -646,7 +699,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ApiError("Файл не выбран")
                 fn, raw = files["file"]
                 crit = int(fields.get("criterion_id") or 0) or None
-                return self.send_json(import_file(conn, sid, crit, fn, raw))
+                return self.send_json(import_file(conn, sid, crit, fn, raw, fields.get("mode", "auto")))
             if p[2:] == ["backup"] and method == "GET":
                 data = export_study(conn, sid)
                 body = json.dumps(data, ensure_ascii=False, indent=1).encode()

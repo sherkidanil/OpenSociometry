@@ -144,19 +144,35 @@ function showNewForm() {
         <label><input type="checkbox" id="n-perc"> Перцептивные выборы («кто, по-вашему, выбрал вас»)</label>
         <span class="muted small">0 = без ограничения</span>
       </div>
+      <div style="margin-top:14px"><label for="n-file">Файл участников или заполненных выборов (.xls, .xlsx, .csv)</label><br>
+        <input type="file" id="n-file" accept=".xls,.xlsx,.csv,.txt"></div>
+      <div class="row" style="margin-top:8px"><label><input type="checkbox" id="n-filled"> Файл уже содержит выборы</label>
+        <a href="/templates/participants.xlsx" download>Пример списка</a>
+        <a href="/templates/choices.xlsx" download>Пример файла с выборами</a></div>
       <div class="row" style="margin-top:14px"><button class="primary" id="n-create">Создать</button>
-        <span class="muted small">Участников можно добавить и позже, в том числе загрузив файл .xlsx / .csv</span></div>
+        <span class="muted small">Участников можно добавить и позже</span></div>
     </div>`;
   $("#n-name").focus();
   $("#n-create").onclick = async () => {
-    const r = await api("POST", "studies", {
+    const study = {
       name: $("#n-name").value,
       members: linesOf($("#n-members").value),
       criteria: linesOf($("#n-criteria").value),
       max_pos: +$("#n-maxpos").value, max_neg: +$("#n-maxneg").value,
       perceptual: $("#n-perc").checked,
-    });
-    location.hash = `#/s/${r.id}/${linesOf($("#n-members").value).length ? "input" : "setup"}`;
+    };
+    const file = $("#n-file").files[0];
+    let r;
+    if (file) {
+      const fd = new FormData();
+      fd.append("study", JSON.stringify(study));
+      fd.append("file", file);
+      fd.append("mode", $("#n-filled").checked ? "matrix" : "members");
+      r = await api("POST", "studies/import", fd);
+    } else {
+      r = await api("POST", "studies", study);
+    }
+    location.hash = `#/s/${r.id}/${file || study.members.length ? "input" : "setup"}`;
   };
 }
 
@@ -192,8 +208,11 @@ function renderSetup(el) {
           <textarea id="add-m" placeholder="По одному на строку"></textarea>
           <div class="row" style="margin-top:8px">
             <button class="primary" id="add-m-btn">Добавить</button>
-            <button id="import-btn">Загрузить из файла (.xlsx, .csv)</button>
+            <button id="import-btn">Загрузить из файла (.xls, .xlsx, .csv)</button>
           </div>
+          <div class="row" style="margin-top:8px"><label><input type="checkbox" id="import-filled"> Файл уже содержит выборы</label>
+            <a href="/templates/participants.xlsx" download>Пример списка</a>
+            <a href="/templates/choices.xlsx" download>Пример выборов</a></div>
           <p class="muted small">Файл со списком: один столбец с ФИО. Файл с уже заполненными выборами: первая строка и первый столбец — ФИО,
             в ячейках <code>+</code> / <code>1</code> для положительного выбора и <code>-</code> / <code>-1</code> для отрицательного.
             Матрица будет загружена в новый критерий.</p>
@@ -256,7 +275,7 @@ function renderSetup(el) {
     await api("POST", `studies/${S.id}/members`, { names });
     await reloadStudy(); renderStudy("setup");
   };
-  $("#import-btn").onclick = () => importFile(null, "setup");
+  $("#import-btn").onclick = () => importFile(null, "setup", $("#import-filled").checked ? "matrix" : "members");
   const addC = async () => {
     if (!$("#add-c").value.trim()) return;
     await api("POST", `studies/${S.id}/criteria`, { name: $("#add-c").value });
@@ -279,11 +298,12 @@ function renderSetup(el) {
   };
 }
 
-async function importFile(criterionId, backTab) {
-  const f = await pickFile(".xlsx,.csv,.txt");
+async function importFile(criterionId, backTab, mode = "auto") {
+  const f = await pickFile(".xls,.xlsx,.csv,.txt");
   if (!f) return;
   const fd = new FormData();
   fd.append("file", f);
+  fd.append("mode", mode);
   if (criterionId) fd.append("criterion_id", criterionId);
   const r = await api("POST", `studies/${S.id}/import`, fd);
   if (r.mode === "members") toast(`Добавлено участников: ${r.added}`);
