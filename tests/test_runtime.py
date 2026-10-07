@@ -1,5 +1,12 @@
 import os
+import json
+import socket
+import subprocess
+import sys
+import tempfile
+import time
 import unittest
+import urllib.request
 from unittest.mock import patch
 
 import app
@@ -15,6 +22,35 @@ class RuntimePathsTests(unittest.TestCase):
             base, static = app.app_paths()
         self.assertEqual(base, os.path.dirname(executable))
         self.assertEqual(static, resources)
+
+    def test_local_server_starts_with_ascii_console(self):
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        with tempfile.TemporaryDirectory() as temp:
+            env = os.environ.copy()
+            env['SOCIOMETRY_DB'] = os.path.join(temp, 'study.db')
+            env['SOCIOMETRY_PORT'] = str(port)
+            env['PYTHONIOENCODING'] = 'ascii'
+            proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
+                                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            try:
+                for _ in range(100):
+                    try:
+                        with urllib.request.urlopen('http://127.0.0.1:%d/api/studies' % port,
+                                                    timeout=0.5) as response:
+                            self.assertEqual(json.load(response), [])
+                            break
+                    except Exception:
+                        if proc.poll() is not None:
+                            self.fail('Server exited with ASCII console')
+                        time.sleep(0.1)
+                else:
+                    self.fail('Server did not start with ASCII console')
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                proc.communicate(timeout=5)
 
 
 if __name__ == '__main__':
