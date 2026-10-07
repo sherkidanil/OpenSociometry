@@ -3,6 +3,14 @@ name: Build portable bundles
 on:
   push:
     branches: [dev]
+    paths:
+      - app.py
+      - static/**
+      - vendor/**
+      - start.bat
+      - start.command
+      - README.md
+      - .github/build_release.py
 
 permissions:
   contents: write
