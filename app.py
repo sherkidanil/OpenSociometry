@@ -955,6 +955,8 @@ def safe_name(s):
 
 
 def main():
+    if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="backslashreplace")
     init_db()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
