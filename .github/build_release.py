@@ -34,7 +34,7 @@ def build(slug):
         proc = subprocess.Popen([str(executable), "--no-browser"], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         try:
-            for _ in range(100):
+            for _ in range(150):
                 try:
                     with urllib.request.urlopen("http://127.0.0.1:9879/api/studies", timeout=1) as response:
                         if json.load(response) == []:
@@ -42,12 +42,16 @@ def build(slug):
                 except Exception:
                     time.sleep(0.2)
             else:
-                raise RuntimeError("Bundled application did not start")
+                proc.terminate()
+                _, stderr = proc.communicate(timeout=10)
+                raise RuntimeError("Bundled application did not start (exit %s): %s" %
+                                   (proc.returncode, stderr.decode(errors="replace")[-3000:]))
             if not Path(env["SOCIOMETRY_DB"]).is_file():
                 raise RuntimeError("Bundled application did not create its local database")
         finally:
-            proc.terminate()
-            proc.wait(timeout=10)
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
     staging = ROOT / "release-stage" / "OpenSociometry-0.1.0"
     staging.mkdir(parents=True, exist_ok=True)
     shutil.copytree(bundle, staging / "OpenSociometry", dirs_exist_ok=True)
