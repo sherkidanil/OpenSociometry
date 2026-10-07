@@ -519,6 +519,24 @@ def import_file(conn, study_id, criterion_id, filename, raw, mode="auto"):
     if mode not in ("auto", "members", "matrix"):
         raise ApiError("Неверный режим импорта")
     header = table[0]
+    # Формат Социоматрица.Онлайн: №, ФИО, 1, 2, ...; в строках номер, имя, выборы.
+    numbered_matrix = (mode != "members" and len(header) >= 4 and
+                       header[0].lower().strip(". ") in ("№", "номер", "n", "no") and
+                       header[1].lower().strip(". ") in ("фио", "ф.и.о", "имя", "name"))
+    if numbered_matrix:
+        rows = [r for r in table[1:] if any(r)]
+        numbers = [r[0] for r in rows]
+        columns = [h for h in header[2:] if h]
+        if (len(numbers) < 2 or len(set(numbers)) != len(numbers) or
+                len(columns) != len(header) - 2 or len(set(columns)) != len(columns) or
+                set(numbers) != set(columns) or
+                any(len(r) < 2 or not r[1] for r in rows)):
+            raise ApiError("Номера участников и столбцов выборов должны совпадать")
+        by_number = {r[0]: r[1] for r in rows}
+        table = [["", *[by_number[h] for h in columns]]] + [
+            [r[1], *[r[i] if i < len(r) else "" for i in range(2, len(header))]]
+            for r in rows]
+        header = table[0]
     names_in_cols = [h for h in header[1:] if h]
     is_matrix = mode == "matrix" or (mode == "auto" and len(names_in_cols) >= 2
         and len(table) >= 3 and set(n.lower() for n in names_in_cols)

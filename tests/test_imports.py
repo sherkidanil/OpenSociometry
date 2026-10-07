@@ -59,6 +59,16 @@ class ImportTests(unittest.TestCase):
             self.assertEqual({c['kind'] for c in study['choices']}, {'pos', 'neg'})
             self.assertEqual(len(study['filled']), 2)
 
+    def test_site_numbered_matrix_xlsx_imports_signed_choices(self):
+        raw = workbook([['№', 'ФИО', 1, 2], [1, 'Анна', '', '+'],
+                        [2, 'Борис', '-', '']])
+        with app.db() as conn:
+            result = app.import_file(conn, self.sid, self.cid, 'site.xlsx', raw, mode='matrix')
+            study = app.get_study(conn, self.sid)
+            self.assertEqual(result['choices'], 2)
+            self.assertEqual([m['name'] for m in study['members']], ['Анна', 'Борис'])
+            self.assertEqual({c['kind'] for c in study['choices']}, {'pos', 'neg'})
+
     def test_invalid_matrix_is_atomic(self):
         raw = 'Name,Анна,Борис\nАнна,,?\nБорис,+,\n'.encode()
         with self.assertRaises(app.ApiError):
@@ -103,7 +113,7 @@ class ImportTests(unittest.TestCase):
 
     def test_downloadable_templates_are_readable(self):
         base = os.path.join(os.path.dirname(__file__), '..', 'static', 'templates')
-        for name, count in [('participants.xlsx', 1), ('choices.xlsx', 3)]:
+        for name, count in [('participants.xlsx', 1), ('choices.xlsx', 5)]:
             with self.subTest(name=name), open(os.path.join(base, name), 'rb') as f:
                 table = app.read_table(name, f.read())
                 self.assertGreaterEqual(len(table), 3)

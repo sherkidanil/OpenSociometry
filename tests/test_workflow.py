@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import sqlite3
+from contextlib import closing
 
 import app
 
@@ -63,9 +64,10 @@ class WorkflowTests(unittest.TestCase):
 
     def test_existing_database_gets_optimistic_setting_without_losing_study(self):
         old_db = os.path.join(self.tmp.name, 'old.db')
-        with sqlite3.connect(old_db) as conn:
+        with closing(sqlite3.connect(old_db)) as conn:
             conn.execute("CREATE TABLE studies (id INTEGER PRIMARY KEY, name TEXT, description TEXT, max_pos INTEGER, max_neg INTEGER, perceptual INTEGER, created_at TEXT, updated_at TEXT)")
             conn.execute("INSERT INTO studies VALUES (1,'Старая группа','',0,0,0,'now','now')")
+            conn.commit()
         app.DB_PATH = old_db
         app.init_db()
         with app.db() as conn:
