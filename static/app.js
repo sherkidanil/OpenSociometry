@@ -9,10 +9,10 @@ const fmt = (v, d = 2) => (v === null || v === undefined ? "—" : (+v).toFixed(
 const pct = (v) => (v === null || v === undefined ? "—" : Math.round(v * 100) + "%");
 const CAT = {
   star: "Звезда", preferred: "Предпочитаемый", accepted: "Принятый",
-  isolated: "Изолированный", rejected: "Отвергнутый",
+  neglected: "Пренебрегаемый", isolated: "Изолированный", rejected: "Отвергнутый",
 };
-const CAT_COLOR = { star: "#4f8a10", preferred: "#b1ec52", accepted: "#aeb5c0", isolated: "#dadde3", rejected: "#e2622f" };
-const DARK_TEXT = new Set(["preferred", "isolated"]);
+const CAT_COLOR = { star: "#4f8a10", preferred: "#b1ec52", accepted: "#aeb5c0", neglected: "#eeb56b", isolated: "#dadde3", rejected: "#e2622f" };
+const DARK_TEXT = new Set(["preferred", "neglected", "isolated"]);
 
 function store(key, val) {
   try {
@@ -77,7 +77,7 @@ async function route() {
       location.hash = "#/";
       return;
     }
-    renderStudy(tab);
+    renderStudy(tab, +parts[3]);
   } else if (parts[0] === "help") {
     renderHelp();
   } else {
@@ -101,15 +101,41 @@ async function renderList() {
       <button id="demo">Открыть демо-пример</button>
       <button class="primary" id="new">+ Новая социометрия</button></div>
     <div id="newform"></div>
+    ${list.length ? `<div class="panel row no-print" style="margin-bottom:14px">
+      <input type="text" id="find-study" class="grow" placeholder="Быстрый поиск по названию">
+      <label><input type="checkbox" id="only-unfilled"> Только незаполненные</label>
+      <label><input type="checkbox" id="only-empty"> Только без участников</label>
+      <label><input type="checkbox" id="only-perc"> С перцептивными выборами</label></div>` : ""}
     ${list.length ? `<div class="cards">${list.map((s) => `
-      <div class="card" data-id="${s.id}">
+      <div class="card" data-id="${s.id}" data-name="${esc(s.name.toLocaleLowerCase())}"
+           data-unfilled="${s.n_members * s.n_criteria > s.n_filled ? 1 : 0}" data-empty="${s.n_members ? 0 : 1}"
+           data-perc="${s.perceptual ? 1 : 0}">
         <h3>${esc(s.name)}</h3>
-        <div class="muted small">${s.n_members} участн. · ${s.n_criteria} критер. · изменено ${esc(s.updated_at)}</div>
+        <div class="muted small">${s.n_members} участн. · ${s.n_criteria} критер. · заполнено ${s.n_filled} из ${s.n_members * s.n_criteria} · изменено ${esc(s.updated_at)}</div>
         ${s.description ? `<div class="small" style="margin-top:6px">${esc(s.description)}</div>` : ""}
+        <button class="link" data-copy="${s.id}" style="margin-top:6px">Сделать копию</button>
       </div>`).join("")}</div>`
       : `<div class="panel empty">Пока нет ни одной социометрии.<br>Создайте новую или откройте демо-пример, чтобы посмотреть, как всё работает.</div>`}
   `;
   $$(".card").forEach((c) => (c.onclick = () => (location.hash = `#/s/${c.dataset.id}/input`)));
+  $$("[data-copy]").forEach((b) => (b.onclick = async (event) => {
+    event.stopPropagation();
+    const result = await api("POST", `studies/${b.dataset.copy}/copy`);
+    location.hash = `#/s/${result.id}/setup`;
+  }));
+  if (list.length) {
+    const applyFilters = () => {
+      const q = $("#find-study").value.trim().toLocaleLowerCase();
+      $$(".card").forEach((card) => {
+        card.hidden = !card.dataset.name.includes(q) ||
+          ($("#only-unfilled").checked && card.dataset.unfilled !== "1") ||
+          ($("#only-empty").checked && card.dataset.empty !== "1") ||
+          ($("#only-perc").checked && card.dataset.perc !== "1");
+      });
+    };
+    $("#find-study").oninput = applyFilters;
+    for (const id of ["only-unfilled", "only-empty", "only-perc"]) $("#" + id).onchange = applyFilters;
+  }
   $("#demo").onclick = async () => {
     const r = await api("POST", "demo");
     location.hash = `#/s/${r.id}/results`;
@@ -142,6 +168,7 @@ function showNewForm() {
         <label>Лимит «+» выборов <input type="number" id="n-maxpos" min="0" value="3"></label>
         <label>Лимит «−» выборов <input type="number" id="n-maxneg" min="0" value="3"></label>
         <label><input type="checkbox" id="n-perc"> Перцептивные выборы («кто, по-вашему, выбрал вас»)</label>
+        <label><input type="checkbox" id="n-optimistic"> Оптимистичный расчёт статусов</label>
         <span class="muted small">0 = без ограничения</span>
       </div>
       <div style="margin-top:14px"><label for="n-file">Файл участников или заполненных выборов (.xls, .xlsx, .csv)</label><br>
@@ -160,6 +187,7 @@ function showNewForm() {
       criteria: linesOf($("#n-criteria").value),
       max_pos: +$("#n-maxpos").value, max_neg: +$("#n-maxneg").value,
       perceptual: $("#n-perc").checked,
+      optimistic: $("#n-optimistic").checked,
     };
     const file = $("#n-file").files[0];
     let r;
@@ -177,8 +205,8 @@ function showNewForm() {
 }
 
 // ------------------------------------------------------------------ study shell
-function renderStudy(tab) {
-  const t = (k, label) => `<a href="#/s/${S.id}/${k}" class="${tab === k ? "active" : ""}">${label}</a>`;
+function renderStudy(tab, personId) {
+  const t = (k, label) => `<a href="#/s/${S.id}/${k}" class="${tab === k || (k === "results" && tab === "person") ? "active" : ""}">${label}</a>`;
   app.innerHTML = `
     <div class="muted small"><a href="#/">← все социометрии</a></div>
     <h1>${esc(S.name)}</h1>
@@ -187,6 +215,7 @@ function renderStudy(tab) {
   const el = $("#tab");
   if (tab === "setup") renderSetup(el);
   else if (tab === "results") renderResults(el);
+  else if (tab === "person") renderPerson(el, personId);
   else renderInput(el);
 }
 
@@ -236,6 +265,7 @@ function renderSetup(el) {
             <label>Лимит «+» <input type="number" id="s-maxpos" min="0" value="${S.max_pos}"></label>
             <label>Лимит «−» <input type="number" id="s-maxneg" min="0" value="${S.max_neg}"></label>
             <label><input type="checkbox" id="s-perc" ${S.perceptual ? "checked" : ""}> Перцептивные выборы</label>
+            <label><input type="checkbox" id="s-optimistic" ${S.optimistic ? "checked" : ""}> Оптимистичный расчёт статусов</label>
           </div>
           <div class="row" style="margin-top:12px"><button class="primary" id="s-save">Сохранить</button></div>
         </div>
@@ -287,6 +317,7 @@ function renderSetup(el) {
     S = await api("PUT", "studies/" + S.id, {
       name: $("#s-name").value, description: $("#s-desc").value,
       max_pos: +$("#s-maxpos").value, max_neg: +$("#s-maxneg").value, perceptual: $("#s-perc").checked,
+      optimistic: $("#s-optimistic").checked,
     });
     toast("Настройки сохранены");
     renderStudy("setup");
@@ -375,12 +406,15 @@ function renderInput(el) {
       <thead><tr><th class="corner rowh muted small">выбирает ↓ / кого →</th>
         ${M.map((m, i) => `<th title="${esc(m.name)}"><span class="vert">${i + 1}. ${esc(m.name)}</span></th>`).join("")}
         <th class="tot" title="Отдано положительных">+</th><th class="tot" title="Отдано отрицательных">−</th>
+        <th class="tot" title="Анкета заполнена">готово</th>
         ${S.perceptual ? `<th class="tot" title="Ожиданий">п</th>` : ""}</tr></thead>
       <tbody>${M.map((m, i) => {
         const po = cnt(m.id, "pos", "out"), no = cnt(m.id, "neg", "out");
         return `<tr data-row="${m.id}"><th class="rowh">${i + 1}. ${esc(m.name)}</th>
           ${M.map((x) => cellHtml(m.id, x.id)).join("")}
           <td class="tot ${overP(po)}">${po}</td><td class="tot ${overN(no)}">${no}</td>
+          <td class="tot"><input type="checkbox" data-filled="${m.id}" aria-label="Анкета ${esc(m.name)} заполнена"
+            ${S.filled.some((q) => q.criterion_id === cid && q.member_id === m.id) ? "checked" : ""}></td>
           ${S.perceptual ? `<td class="tot">${cnt(m.id, "ppos", "out") + cnt(m.id, "pneg", "out")}</td>` : ""}</tr>`;
       }).join("")}
       <tr class="totrow"><th class="rowh">Получено +</th>${M.map((m) => `<td class="tot" style="color:var(--accent)">${cnt(m.id, "pos", "in")}</td>`).join("")}<td colspan="3"></td></tr>
@@ -397,6 +431,15 @@ function renderInput(el) {
     </div>`;
 
   bindCritTabs(el, () => renderInput(el));
+  $$("[data-filled]", el).forEach((checkbox) => (checkbox.onchange = async () => {
+    const memberId = +checkbox.dataset.filled;
+    try {
+      await api("POST", "questionnaire", { criterion_id: cid, member_id: memberId, filled: checkbox.checked });
+      S.filled = S.filled.filter((q) => !(q.criterion_id === cid && q.member_id === memberId));
+      if (checkbox.checked) S.filled.push({ criterion_id: cid, member_id: memberId });
+      toast("Сохранено локально");
+    } catch (e) { checkbox.checked = !checkbox.checked; }
+  }));
   $$("[data-mode]", el).forEach((b) => (b.onclick = () => { inputMode = b.dataset.mode; renderInput(el); }));
   $("#imp").onclick = () => importFile(cid, "input");
   $("#clr").onclick = async () => {
@@ -467,7 +510,8 @@ async function renderResults(el) {
       ${st(fmt(G.cohesion), "Сплочённость (взаимность +)", `${G.mutual_pos_pairs} взаимных пар из ${G.n * (G.n - 1) / 2} возможных`)}
       ${st(fmt(G.conflict), "Конфликтность", `${G.mutual_neg_pairs} пар взаимного отвержения`)}
       ${st(pct(G.reciprocity), "Доля взаимных «+» выборов", lvl(G.reciprocity, 0.3, 0.6))}
-      ${st(fmt(G.expansiveness_pos), "Эмоц. экспансивность группы", "среднее число «+» выборов на человека")}
+      ${st(fmt(G.expansiveness_total), "Эмоц. экспансивность группы", "среднее число всех выборов на человека")}
+      ${st(fmt(G.reference), "Референтность группы", "взаимных положительных пар / всех положительных выборов")}
       ${st(pct(G.tension), "Напряжённость", "доля «−» среди всех выборов")}
       ${st(pct(G.wellbeing), "КБВ (благополучие отношений)", "доля звёзд и предпочитаемых · " + lvl(G.wellbeing, 0.35, 0.6))}
       ${st(pct(G.isolation), "Индекс изолированности", "доля изолированных и отвергнутых")}
@@ -481,8 +525,16 @@ async function renderResults(el) {
       <div class="legend" style="margin-top:8px">${Object.entries(G.categories).map(([k, n]) =>
         `<span><span class="sw" style="background:${CAT_COLOR[k]}"></span>${CAT[k]}: <b>${n}</b></span>`).join("")}</div>
       <div class="muted small" style="margin-top:6px">Среднее число полученных «+»: ${fmt(G.mean_received)}, σ = ${fmt(G.sd_received)}.
-        Звёзды — выше среднего + σ; предпочитаемые — выше среднего; принятые — 1 и более «+» до среднего; изолированные — без выборов;
-        отвергнутые — «−» больше, чем «+».</div>
+        Звёзды — от двух средних «+»; предпочитаемые — от полутора средних «+» при малом числе «−»;
+        пренебрегаемые — мало «+» или много «−»; отвергаемые — мало «+» при наличии «−»; изолированные — без полученных выборов.
+        ${S.optimistic ? "Включён оптимистичный расчёт статусов." : ""}</div>
+    </div>
+
+    <h2>Взаимные и парадоксальные выборы</h2>
+    <div class="panel pair-list">
+      ${pairSection("Взаимно-положительные", R.pairs.mutual_pos, byId)}
+      ${pairSection("Взаимно-отрицательные", R.pairs.mutual_neg, byId)}
+      ${pairSection("Парадоксальные (+/−)", R.pairs.paradoxical, byId)}
     </div>
 
     <h2>Социограмма</h2>
@@ -499,10 +551,13 @@ async function renderResults(el) {
     <div class="graph-box" id="g2"></div>
     <div class="muted small" style="margin-top:6px">В центре — звёзды, далее предпочитаемые, принятые; на внешнем круге — изолированные и отвергнутые.</div>
 
+    <h2>Социограмма взаимных выборов</h2>
+    <div class="graph-box" id="g3"></div>
+
     <h2>Индивидуальные показатели</h2>
     <div class="panel" style="padding:0;overflow:auto"><table class="data" id="ind"></table></div>
     <div class="muted small">Статус + = получено «+» / (N−1); статус − = получено «−» / (N−1); сводный статус = (получено «+» − получено «−») / (N−1);
-      экспансивность = отдано выборов / (N−1); Куд (удовлетворённость) = взаимные «+» / отдано «+».
+      экспансивность = отдано выборов / (N−1); Куд в отчёте = получено «+» / отдано «+».
       ${R.study.perceptual ? "Точность ожиданий = оправдавшиеся ожидания / все ожидания; осознанность = угаданные выборы / полученные выборы." : ""}</div>
 
     <h2>Социоматрица</h2>
@@ -525,6 +580,12 @@ async function renderResults(el) {
   renderIndividual(R);
   const g1 = new Graph($("#g1"), R, "force");
   new Graph($("#g2"), R, "target", g1);
+  new Graph($("#g3"), R, "force", null, { mutualOnly: true });
+}
+
+function pairSection(title, pairs, byId) {
+  return `<h3>${title} (${pairs.length})</h3><p>${pairs.length ? pairs.map(([a, b]) =>
+    `${esc(byId[a].name)} — ${esc(byId[b].name)}`).join(", ") : "Таких выборов нет."}</p>`;
 }
 
 function renderIndividual(R) {
@@ -536,7 +597,7 @@ function renderIndividual(R) {
   ];
   if (R.study.perceptual) cols.push(["accuracy_pos", "Точн. ожид. +"], ["awareness_pos", "Осознан. +"]);
   let sortKey = renderIndividual.key || "rank", dir = renderIndividual.dir || 1;
-  const catOrder = { star: 0, preferred: 1, accepted: 2, isolated: 3, rejected: 4 };
+  const catOrder = { star: 0, preferred: 1, accepted: 2, neglected: 3, rejected: 4, isolated: 5 };
   const draw = () => {
     const rows = [...R.members].sort((a, b) => {
       let x = a[sortKey], y = b[sortKey];
@@ -547,7 +608,7 @@ function renderIndividual(R) {
     $("#ind").innerHTML = `<thead><tr>${cols.map(([k, l]) => `<th data-k="${k}">${l}${k === sortKey ? (dir > 0 ? " ▲" : " ▼") : ""}</th>`).join("")}</tr></thead>
       <tbody>${rows.map((r) => `<tr>${cols.map(([k]) => {
         const v = r[k];
-        if (k === "name") return `<td>${esc(v)}</td>`;
+        if (k === "name") return `<td><a href="#/s/${S.id}/person/${r.id}">${esc(v)}</a></td>`;
         if (k === "category") return `<td><span class="badge b-${v}">${CAT[v]}</span></td>`;
         if (typeof v === "number" && !Number.isInteger(v)) return `<td>${fmt(v)}</td>`;
         if (["status_pos", "status_neg", "status", "exp_pos", "satisfaction", "accuracy_pos", "awareness_pos"].includes(k)) return `<td>${fmt(v)}</td>`;
@@ -562,6 +623,42 @@ function renderIndividual(R) {
   draw();
 }
 
+async function renderPerson(el, memberId) {
+  const cid = currentCriterion();
+  if (!cid) return renderResults(el);
+  const R = await api("GET", `criteria/${cid}/results`);
+  const member = R.members.find((m) => m.id === memberId);
+  if (!member) {
+    el.innerHTML = `<div class="panel empty">Участник не найден. <a href="#/s/${S.id}/results">Вернуться к отчёту</a></div>`;
+    return;
+  }
+  const byId = Object.fromEntries(R.members.map((m) => [m.id, m]));
+  const names = (kind, direction) => R.edges.filter((e) => e.kind === kind && e[direction] === memberId)
+    .map((e) => esc(byId[direction === "source" ? e.target : e.source].name)).join(", ") || "нет";
+  el.innerHTML = `<div class="row no-print"><a href="#/s/${S.id}/results">← Общий отчёт</a>
+      <span class="grow"></span><button onclick="window.print()">Печать / PDF</button></div>
+    <h2>${esc(member.name)}</h2>
+    <div class="panel"><span class="badge b-${member.category}">${CAT[member.category]}</span>
+      <span class="muted small"> · место в группе: ${member.rank}</span></div>
+    <div class="stats">
+      <div class="stat"><div class="v">${fmt(member.status_pos)}</div><div class="l">Положительный статус</div></div>
+      <div class="stat"><div class="v">${fmt(member.status_neg)}</div><div class="l">Отрицательный статус</div></div>
+      <div class="stat"><div class="v">${fmt(member.status)}</div><div class="l">Сводный статус</div></div>
+      <div class="stat"><div class="v">${fmt(member.exp_pos + member.exp_neg)}</div><div class="l">Общая экспансивность</div></div>
+      <div class="stat"><div class="v">${fmt(member.satisfaction)}</div><div class="l">Куд</div></div>
+    </div>
+    <h2>Выборы участника</h2>
+    <div class="panel person-choices">
+      <p><b>Выбрал (+):</b> ${names("pos", "source")}</p>
+      <p><b>Выбрал (−):</b> ${names("neg", "source")}</p>
+      <p><b>Получил (+):</b> ${names("pos", "target")}</p>
+      <p><b>Получил (−):</b> ${names("neg", "target")}</p>
+    </div>
+    <h2>Связи в группе</h2><div class="graph-box" id="person-graph"></div>`;
+  const graph = new Graph($("#person-graph"), R, "force");
+  graph.highlight(graph.byId[memberId]);
+}
+
 // ------------------------------------------------------------------ sociogram
 const SVGNS = "http://www.w3.org/2000/svg";
 const svgEl = (tag, attrs = {}) => {
@@ -571,9 +668,9 @@ const svgEl = (tag, attrs = {}) => {
 };
 
 class Graph {
-  constructor(box, R, layout, ref) {
+  constructor(box, R, layout, ref, initialShow = {}) {
     this.box = box; this.R = R; this.layout = layout;
-    this.show = { pos: true, neg: true, mutualOnly: false };
+    this.show = { pos: true, neg: true, mutualOnly: false, ...initialShow };
     this.view = { x: 0, y: 0, k: 1 };
     this.W = 1000; this.H = 620;
     this.nodes = R.members.map((m) => ({ ...m, r: 9 + 4 * Math.sqrt(m.pos_in), x: 0, y: 0, vx: 0, vy: 0 }));
@@ -607,6 +704,10 @@ class Graph {
     fit.textContent = "Вписать";
     fit.onclick = () => { this.fit(); };
     tools.appendChild(fit);
+    const saveSvg = document.createElement("button");
+    saveSvg.textContent = "Скачать SVG";
+    saveSvg.onclick = () => this.downloadSvg();
+    tools.appendChild(saveSvg);
     if (this.layout === "force") {
       const re = document.createElement("button");
       re.textContent = "Перестроить";
@@ -709,6 +810,22 @@ class Graph {
     this.vp.setAttribute("transform", `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`);
   }
 
+  downloadSvg() {
+    const copy = this.svg.cloneNode(true);
+    copy.setAttribute("xmlns", SVGNS);
+    copy.setAttribute("width", this.W);
+    copy.setAttribute("height", this.H);
+    const style = svgEl("style");
+    style.textContent = ".node text{font:12px sans-serif;paint-order:stroke;stroke:white;stroke-width:3px}.node circle{stroke:#15181e;stroke-opacity:.25;stroke-width:1.5}.dim{opacity:.12}";
+    copy.prepend(style);
+    const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = `${S.name} - ${this.layout === "target" ? "мишень" : "социограмма"}.svg`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   fit() {
     if (!this.nodes.length) return;
     const pad = 60;
@@ -785,7 +902,7 @@ class Graph {
   }
 
   targetLayout(ref) {
-    const rings = { star: 0, preferred: 1, accepted: 2, isolated: 3, rejected: 3 };
+    const rings = { star: 0, preferred: 1, accepted: 2, neglected: 3, isolated: 3, rejected: 3 };
     const step = 85;
     this.Rmax = step * 3.5 + 30;
     for (let i = 0; i < 4; i++) {
@@ -861,20 +978,24 @@ function renderHelp() {
   Программа считает, насколько ожидания совпали с реальностью: <i>точность ожиданий</i> (сколько из ожидаемых действительно выбрали)
   и <i>осознанность</i> (какую долю реально полученных выборов участник угадал).</p>
   <h2>Загрузка из файла</h2>
-  <p>Поддерживаются .xlsx и .csv (разделитель «;» или «,»). Список участников — один столбец с ФИО.
-  Готовая матрица выборов — первая строка и первый столбец содержат ФИО, в ячейках «+»/«1» и «−»/«-1».</p>
+  <p>Поддерживаются .xls, .xlsx и .csv (разделитель «;» или «,»). Список участников — один столбец с ФИО или два столбца «№» и «ФИО».
+  Готовая матрица выборов — первая строка и первый столбец содержат ФИО, в ячейках «+»/«1» и «−»/«-1».
+  При создании отметьте «Файл уже содержит выборы». <a href="/templates/participants.xlsx" download>Пример списка</a> ·
+  <a href="/templates/choices.xlsx" download>Пример матрицы</a>.</p>
   <h2>Формулы</h2>
   <ul>
     <li><b>N</b> — число участников; <b>R+</b>, <b>R−</b> — полученные положительные и отрицательные выборы.</li>
     <li>Социометрический статус: <code>C+ = R+ / (N−1)</code>, <code>C− = R− / (N−1)</code>, сводный <code>(R+ − R−) / (N−1)</code>.</li>
-    <li>Эмоциональная экспансивность участника: <code>отдано выборов / (N−1)</code>; группы — среднее число «+» выборов на человека.</li>
-    <li>Коэффициент удовлетворённости <code>Куд = взаимные «+» / отдано «+»</code>.</li>
+    <li>Эмоциональная экспансивность участника: <code>отдано выборов / (N−1)</code>; группы — среднее число всех выборов на человека.</li>
+    <li>Коэффициент удовлетворённости в отчёте: <code>Куд = получено «+» / отдано «+»</code>.</li>
     <li>Сплочённость группы: <code>взаимные пары «+» / (N·(N−1)/2)</code>; конфликтность — то же для взаимных «−».</li>
+    <li>Референтность группы: <code>взаимные пары «+» / все положительные выборы</code>.</li>
     <li>Доля взаимных выборов: <code>2 · взаимные пары «+» / все «+» выборы</code>.</li>
     <li>Напряжённость: доля отрицательных выборов среди всех.</li>
     <li>КБВ (коэффициент благополучия взаимоотношений): доля звёзд и предпочитаемых; индекс изолированности — доля изолированных и отвергнутых.</li>
-    <li>Статусные категории считаются от среднего (M) и стандартного отклонения (σ) полученных «+»: звезда — больше M+σ,
-      предпочитаемый — больше M, принятый — от 1 до M, изолированный — 0 выборов, отвергнутый — «−» больше, чем «+».</li>
+    <li>Статусные категории считаются от среднего (M) полученных «+»: звезда — от 2M, предпочитаемый — от 1,5M при малом числе «−»,
+      пренебрегаемый — мало «+» или много «−», отвергаемый — мало «+» при наличии «−», изолированный — нет полученных выборов.
+      Оптимистичный режим учитывает положительные выборы при отнесении к низким статусным группам.</li>
   </ul>
   <h2>Где хранятся данные</h2>
   <p>Все данные лежат в одном файле <code>data/sociometry.db</code> в папке программы. Чтобы перенести их на другой компьютер, скопируйте

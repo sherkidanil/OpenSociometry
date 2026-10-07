@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS studies (
     max_pos INTEGER NOT NULL DEFAULT 0,
     max_neg INTEGER NOT NULL DEFAULT 0,
     perceptual INTEGER NOT NULL DEFAULT 0,
+    optimistic INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -61,6 +62,11 @@ CREATE TABLE IF NOT EXISTS choices (
     to_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     PRIMARY KEY (criterion_id, from_id, to_id, kind)
+);
+CREATE TABLE IF NOT EXISTS questionnaires (
+    criterion_id INTEGER NOT NULL REFERENCES criteria(id) ON DELETE CASCADE,
+    member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    PRIMARY KEY (criterion_id, member_id)
 );
 """
 
@@ -85,6 +91,9 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with db() as conn:
         conn.executescript(SCHEMA)
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(studies)")}
+        if "optimistic" not in columns:
+            conn.execute("ALTER TABLE studies ADD COLUMN optimistic INTEGER NOT NULL DEFAULT 0")
 
 
 class ApiError(Exception):
@@ -110,8 +119,11 @@ def get_study(conn, study_id):
     choices = [dict(r) for r in conn.execute(
         "SELECT c.* FROM choices c JOIN criteria k ON k.id=c.criterion_id WHERE k.study_id=?",
         (study_id,))]
+    filled = [dict(r) for r in conn.execute(
+        "SELECT q.* FROM questionnaires q JOIN criteria k ON k.id=q.criterion_id WHERE k.study_id=?",
+        (study_id,))]
     out = dict(s)
-    out.update(members=members, criteria=criteria, choices=choices)
+    out.update(members=members, criteria=criteria, choices=choices, filled=filled)
     return out
 
 
@@ -148,10 +160,11 @@ def add_criterion(conn, study_id, name):
 def create_study(conn, data):
     name = (data.get("name") or "").strip() or "Новая социометрия"
     cur = conn.execute(
-        "INSERT INTO studies(name,description,max_pos,max_neg,perceptual,created_at,updated_at)"
-        " VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO studies(name,description,max_pos,max_neg,perceptual,optimistic,created_at,updated_at)"
+        " VALUES(?,?,?,?,?,?,?,?)",
         (name, data.get("description", ""), int(data.get("max_pos") or 0),
-         int(data.get("max_neg") or 0), 1 if data.get("perceptual") else 0, now(), now()))
+         int(data.get("max_neg") or 0), 1 if data.get("perceptual") else 0,
+         1 if data.get("optimistic") else 0, now(), now()))
     sid = cur.lastrowid
     crits = data.get("criteria") or ["С кем бы вы хотели работать вместе?"]
     for c in crits:
@@ -184,10 +197,36 @@ def set_choice(conn, data):
     touch(conn, sid)
 
 
+def set_questionnaire_filled(conn, criterion_id, member_id, filled):
+    sid = study_of_criterion(conn, criterion_id)
+    if not conn.execute("SELECT 1 FROM members WHERE id=? AND study_id=?", (member_id, sid)).fetchone():
+        raise ApiError("Участник не принадлежит этой социометрии")
+    if filled:
+        conn.execute("INSERT OR IGNORE INTO questionnaires VALUES(?,?)", (criterion_id, member_id))
+    else:
+        conn.execute("DELETE FROM questionnaires WHERE criterion_id=? AND member_id=?",
+                     (criterion_id, member_id))
+    touch(conn, sid)
+
+
 # ---------------------------------------------------------------- calculations
 
 def r3(x):
     return None if x is None else round(x, 3)
+
+
+def classify_status(pos_in, neg_in, mean_pos, mean_neg, optimistic=False):
+    if pos_in == 0 and neg_in == 0:
+        return "isolated"
+    if mean_pos > 0 and pos_in >= 2 * mean_pos:
+        return "star"
+    if mean_pos > 0 and pos_in >= 1.5 * mean_pos and neg_in <= mean_neg / 3:
+        return "preferred"
+    if neg_in and (pos_in == 0 or (not optimistic and pos_in <= mean_pos / 2)):
+        return "rejected"
+    if neg_in and (pos_in <= mean_pos / 1.5 or neg_in >= 1.5 * pos_in):
+        return "neglected"
+    return "accepted"
 
 
 def compute(conn, criterion_id):
@@ -219,7 +258,7 @@ def compute(conn, criterion_id):
             status_pos=r3(pos_in / d), status_neg=r3(neg_in / d),
             status=r3((pos_in - neg_in) / d),
             exp_pos=r3(pos_out / d), exp_neg=r3(neg_out / d),
-            satisfaction=r3(mutual_pos / pos_out) if pos_out else None,
+            satisfaction=r3(pos_in / pos_out) if pos_out else None,
         )
         # перцептивные выборы: кто, по мнению i, выбрал его
         exp_p = [j for j in ids if (i, j) in sel["ppos"]]
@@ -235,22 +274,14 @@ def compute(conn, criterion_id):
         )
         rows.append(row)
 
-    # статусные категории: пороги по среднему и стандартному отклонению полученных «+»
+    # Категории по опубликованным порогам Социоматрица.Онлайн.
     received = [r["pos_in"] for r in rows]
     mean = sum(received) / n if n else 0
+    mean_neg = sum(r["neg_in"] for r in rows) / n if n else 0
     sd = math.sqrt(sum((x - mean) ** 2 for x in received) / n) if n else 0
     for r in rows:
-        if r["pos_in"] == 0 and r["neg_in"] > 0 or (r["neg_in"] > r["pos_in"]):
-            cat = "rejected"
-        elif r["pos_in"] == 0:
-            cat = "isolated"
-        elif r["pos_in"] > mean + sd:
-            cat = "star"
-        elif r["pos_in"] > mean:
-            cat = "preferred"
-        else:
-            cat = "accepted"
-        r["category"] = cat
+        r["category"] = classify_status(r["pos_in"], r["neg_in"], mean, mean_neg,
+                                         bool(study.get("optimistic", 0)))
     ranked = sorted(rows, key=lambda r: (-r["status"], -r["pos_in"], r["name"]))
     for place, r in enumerate(ranked, 1):
         r["rank"] = place
@@ -258,11 +289,15 @@ def compute(conn, criterion_id):
     pairs = n * (n - 1) / 2 if n > 1 else 1
     total_pos = len(sel["pos"])
     total_neg = len(sel["neg"])
-    mpos_pairs = sum(1 for (a, b) in sel["pos"] if a < b and (b, a) in sel["pos"])
-    mneg_pairs = sum(1 for (a, b) in sel["neg"] if a < b and (b, a) in sel["neg"])
-    mixed_pairs = sum(1 for (a, b) in sel["pos"] if (b, a) in sel["neg"])
+    positive_pairs = sorted([a, b] for a, b in sel["pos"] if a < b and (b, a) in sel["pos"])
+    negative_pairs = sorted([a, b] for a, b in sel["neg"] if a < b and (b, a) in sel["neg"])
+    paradoxical_pairs = sorted({(min(a, b), max(a, b)) for a, b in sel["pos"]
+                                if (b, a) in sel["neg"]})
+    mpos_pairs = len(positive_pairs)
+    mneg_pairs = len(negative_pairs)
+    mixed_pairs = len(paradoxical_pairs)
     counts = {k: sum(1 for r in rows if r["category"] == k)
-              for k in ("star", "preferred", "accepted", "isolated", "rejected")}
+              for k in ("star", "preferred", "accepted", "neglected", "isolated", "rejected")}
     wellbeing = (counts["star"] + counts["preferred"]) / n if n else 0
     isolation = (counts["isolated"] + counts["rejected"]) / n if n else 0
     total_pp = len(sel["ppos"])
@@ -272,11 +307,13 @@ def compute(conn, criterion_id):
     group = dict(
         n=n, total_pos=total_pos, total_neg=total_neg,
         mutual_pos_pairs=mpos_pairs, mutual_neg_pairs=mneg_pairs, mixed_pairs=mixed_pairs,
+        expansiveness_total=r3((total_pos + total_neg) / n) if n else 0,
         expansiveness_pos=r3(total_pos / n) if n else None,
         expansiveness_neg=r3(total_neg / n) if n else None,
         cohesion=r3(mpos_pairs / pairs),
         conflict=r3(mneg_pairs / pairs),
         reciprocity=r3(2 * mpos_pairs / total_pos) if total_pos else None,
+        reference=r3(mpos_pairs / total_pos) if total_pos else 0,
         tension=r3(total_neg / (total_pos + total_neg)) if (total_pos + total_neg) else None,
         wellbeing=r3(wellbeing), isolation=r3(isolation),
         mean_received=r3(mean), sd_received=r3(sd),
@@ -286,11 +323,13 @@ def compute(conn, criterion_id):
     )
     edges = [dict(source=a, target=b, kind=k) for k in ("pos", "neg") for (a, b) in sel[k]]
     return dict(study=dict(id=sid, name=study["name"], perceptual=study["perceptual"]),
-                criterion=crit, members=rows, group=group, edges=edges)
+                criterion=crit, members=rows, group=group, edges=edges,
+                pairs=dict(mutual_pos=positive_pairs, mutual_neg=negative_pairs,
+                           paradoxical=[list(p) for p in paradoxical_pairs]))
 
 
 CAT_RU = dict(star="Звезда", preferred="Предпочитаемый", accepted="Принятый",
-              isolated="Изолированный", rejected="Отвергнутый")
+              neglected="Пренебрегаемый", isolated="Изолированный", rejected="Отвергнутый")
 
 
 def results_csv(res):
@@ -470,6 +509,8 @@ def import_file(conn, study_id, criterion_id, filename, raw, mode="auto"):
     for source, target, kind in marks:
         set_choice(conn, dict(criterion_id=criterion_id, from_id=existing[source],
                               to_id=existing[target], kind=kind))
+    for name in row_names:
+        set_questionnaire_filled(conn, criterion_id, existing[name.casefold()], True)
     return dict(mode="matrix", added=len(new), choices=len(marks), criterion_id=criterion_id)
 
 
@@ -548,16 +589,18 @@ def export_study(conn, sid):
     st = get_study(conn, sid)
     idx = {m["id"]: k for k, m in enumerate(st["members"])}
     cidx = {c["id"]: k for k, c in enumerate(st["criteria"])}
-    return dict(format="opensociometry/1", name=st["name"], description=st["description"],
+    return dict(format="opensociometry/2", name=st["name"], description=st["description"],
                 max_pos=st["max_pos"], max_neg=st["max_neg"], perceptual=st["perceptual"],
+                optimistic=st["optimistic"],
                 members=[m["name"] for m in st["members"]],
                 criteria=[c["name"] for c in st["criteria"]],
                 choices=[[cidx[c["criterion_id"]], idx[c["from_id"]], idx[c["to_id"]], c["kind"]]
-                         for c in st["choices"]])
+                         for c in st["choices"]],
+                filled=[[cidx[q["criterion_id"]], idx[q["member_id"]]] for q in st["filled"]])
 
 
 def import_study_json(conn, data):
-    if data.get("format") not in ("opensociometry/1", "sociometry-local/1"):
+    if data.get("format") not in ("opensociometry/1", "opensociometry/2", "sociometry-local/1"):
         raise ApiError("Это не файл резервной копии OpenSociometry")
     sid = create_study(conn, dict(data, criteria=data["criteria"] or ["Критерий"],
                                   members=data["members"]))
@@ -566,7 +609,15 @@ def import_study_json(conn, data):
     cids = [c["id"] for c in st["criteria"]]
     for ci, a, b, kind in data["choices"]:
         conn.execute("INSERT OR IGNORE INTO choices VALUES(?,?,?,?)", (cids[ci], mids[a], mids[b], kind))
+    for ci, member in data.get("filled", []):
+        set_questionnaire_filled(conn, cids[ci], mids[member], True)
     return sid
+
+
+def clone_study(conn, sid):
+    data = export_study(conn, sid)
+    data["name"] += " (копия)"
+    return import_study_json(conn, data)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -652,7 +703,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == ["studies"] and method == "GET":
             rows = conn.execute(
                 "SELECT s.*, (SELECT COUNT(*) FROM members m WHERE m.study_id=s.id) AS n_members,"
-                " (SELECT COUNT(*) FROM criteria c WHERE c.study_id=s.id) AS n_criteria"
+                " (SELECT COUNT(*) FROM criteria c WHERE c.study_id=s.id) AS n_criteria,"
+                " (SELECT COUNT(*) FROM questionnaires q JOIN criteria c ON c.id=q.criterion_id"
+                " WHERE c.study_id=s.id) AS n_filled"
                 " FROM studies s ORDER BY s.updated_at DESC, s.id DESC").fetchall()
             return self.send_json([dict(r) for r in rows])
         if p == ["studies"] and method == "POST":
@@ -677,10 +730,11 @@ class Handler(BaseHTTPRequestHandler):
                 if method == "PUT":
                     d = self.json_body()
                     get_study(conn, sid)
-                    conn.execute("UPDATE studies SET name=?,description=?,max_pos=?,max_neg=?,perceptual=?,updated_at=? WHERE id=?",
+                    conn.execute("UPDATE studies SET name=?,description=?,max_pos=?,max_neg=?,perceptual=?,optimistic=?,updated_at=? WHERE id=?",
                                  (d["name"].strip() or "Без названия", d.get("description", ""),
                                   int(d.get("max_pos") or 0), int(d.get("max_neg") or 0),
-                                  1 if d.get("perceptual") else 0, now(), sid))
+                                  1 if d.get("perceptual") else 0,
+                                  1 if d.get("optimistic") else 0, now(), sid))
                     return self.send_json(get_study(conn, sid))
                 if method == "DELETE":
                     conn.execute("DELETE FROM studies WHERE id=?", (sid,))
@@ -689,6 +743,8 @@ class Handler(BaseHTTPRequestHandler):
                 get_study(conn, sid)
                 names = self.json_body().get("names", [])
                 return self.send_json({"added": add_members(conn, sid, names)})
+            if p[2:] == ["copy"] and method == "POST":
+                return self.send_json({"id": clone_study(conn, sid)})
             if p[2:] == ["criteria"] and method == "POST":
                 get_study(conn, sid)
                 return self.send_json({"id": add_criterion(conn, sid, self.json_body().get("name", ""))})
@@ -740,6 +796,11 @@ class Handler(BaseHTTPRequestHandler):
                                       "%s - %s.csv" % (safe_name(res["study"]["name"]), safe_name(res["criterion"]["name"])[:40]))
         if p == ["choice"] and method == "POST":
             set_choice(conn, self.json_body())
+            return self.send_json({"ok": True})
+        if p == ["questionnaire"] and method == "POST":
+            data = self.json_body()
+            set_questionnaire_filled(conn, int(data["criterion_id"]),
+                                     int(data["member_id"]), bool(data["filled"]))
             return self.send_json({"ok": True})
         raise ApiError("Не найдено", 404)
 

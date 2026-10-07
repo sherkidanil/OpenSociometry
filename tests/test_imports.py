@@ -57,6 +57,7 @@ class ImportTests(unittest.TestCase):
             self.assertEqual((result['mode'], result['added'], result['choices']), ('matrix', 2, 2))
             study = app.get_study(conn, self.sid)
             self.assertEqual({c['kind'] for c in study['choices']}, {'pos', 'neg'})
+            self.assertEqual(len(study['filled']), 2)
 
     def test_invalid_matrix_is_atomic(self):
         raw = 'Name,Анна,Борис\nАнна,,?\nБорис,+,\n'.encode()
