@@ -49,7 +49,7 @@ class WorkflowTests(unittest.TestCase):
         with app.db() as conn:
             app.set_questionnaire_filled(conn, self.cid, self.anna, True)
             data = app.export_study(conn, self.sid)
-            self.assertEqual(data['format'], 'opensociometry/2')
+            self.assertEqual(data['format'], 'opensociometry/3')
             restored_id = app.import_study_json(conn, data)
             restored = app.get_study(conn, restored_id)
             self.assertEqual(len(restored['filled']), 1)

@@ -6,6 +6,8 @@
 Все данные хранятся в файле data/sociometry.db рядом с этим скриптом.
 """
 import csv
+import base64
+import binascii
 import io
 import json
 import math
@@ -68,6 +70,17 @@ CREATE TABLE IF NOT EXISTS questionnaires (
     member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     PRIMARY KEY (criterion_id, member_id)
 );
+CREATE TABLE IF NOT EXISTS member_photos (
+    member_id INTEGER PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+    mime TEXT NOT NULL,
+    data BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS graph_layouts (
+    criterion_id INTEGER NOT NULL REFERENCES criteria(id) ON DELETE CASCADE,
+    graph_key TEXT NOT NULL,
+    positions TEXT NOT NULL,
+    PRIMARY KEY (criterion_id, graph_key)
+);
 """
 
 
@@ -113,7 +126,8 @@ def get_study(conn, study_id):
     if not s:
         raise ApiError("Социометрия не найдена", 404)
     members = [dict(r) for r in conn.execute(
-        "SELECT * FROM members WHERE study_id=? ORDER BY pos, id", (study_id,))]
+        "SELECT m.*, EXISTS(SELECT 1 FROM member_photos p WHERE p.member_id=m.id) AS has_photo"
+        " FROM members m WHERE m.study_id=? ORDER BY m.pos, m.id", (study_id,))]
     criteria = [dict(r) for r in conn.execute(
         "SELECT * FROM criteria WHERE study_id=? ORDER BY pos, id", (study_id,))]
     choices = [dict(r) for r in conn.execute(
@@ -209,6 +223,55 @@ def set_questionnaire_filled(conn, criterion_id, member_id, filled):
     touch(conn, sid)
 
 
+def set_member_photo(conn, member_id, raw):
+    member = conn.execute("SELECT study_id FROM members WHERE id=?", (member_id,)).fetchone()
+    if not member:
+        raise ApiError("Участник не найден", 404)
+    if len(raw) > 3 * 1024 * 1024:
+        raise ApiError("Изображение больше 3 МБ")
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif raw.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        raise ApiError("Поддерживаются изображения PNG, JPEG и WebP")
+    conn.execute("INSERT OR REPLACE INTO member_photos VALUES(?,?,?)", (member_id, mime, raw))
+    touch(conn, member["study_id"])
+
+
+def get_member_photo(conn, member_id):
+    row = conn.execute("SELECT mime,data FROM member_photos WHERE member_id=?", (member_id,)).fetchone()
+    if not row:
+        raise ApiError("Фото не найдено", 404)
+    return row["mime"], row["data"]
+
+
+def save_graph_layout(conn, criterion_id, graph_key, positions):
+    sid = study_of_criterion(conn, criterion_id)
+    if graph_key not in ("force", "target", "mutual") or not isinstance(positions, dict):
+        raise ApiError("Неверная раскладка графа")
+    member_ids = {str(r[0]) for r in conn.execute("SELECT id FROM members WHERE study_id=?", (sid,))}
+    if not set(positions).issubset(member_ids):
+        raise ApiError("Раскладка содержит участников другой социометрии")
+    for point in positions.values():
+        if (not isinstance(point, list) or len(point) != 2 or
+                any(not isinstance(v, (int, float)) or not math.isfinite(v) or abs(v) > 10000
+                    for v in point)):
+            raise ApiError("Неверные координаты графа")
+    conn.execute("INSERT OR REPLACE INTO graph_layouts VALUES(?,?,?)",
+                 (criterion_id, graph_key, json.dumps(positions)))
+    touch(conn, sid)
+
+
+def get_graph_layout(conn, criterion_id, graph_key):
+    study_of_criterion(conn, criterion_id)
+    row = conn.execute("SELECT positions FROM graph_layouts WHERE criterion_id=? AND graph_key=?",
+                       (criterion_id, graph_key)).fetchone()
+    return json.loads(row["positions"]) if row else {}
+
+
 # ---------------------------------------------------------------- calculations
 
 def r3(x):
@@ -220,11 +283,12 @@ def classify_status(pos_in, neg_in, mean_pos, mean_neg, optimistic=False):
         return "isolated"
     if mean_pos > 0 and pos_in >= 2 * mean_pos:
         return "star"
-    if mean_pos > 0 and pos_in >= 1.5 * mean_pos and neg_in <= mean_neg / 3:
+    if mean_pos > 0 and pos_in >= round(1.5 * mean_pos) and neg_in <= 3 * mean_neg:
         return "preferred"
-    if neg_in and (pos_in == 0 or (not optimistic and pos_in <= mean_pos / 2)):
+    if neg_in and (pos_in == 0 or (not optimistic and pos_in < mean_pos / 3
+                                  and neg_in >= 3 * mean_neg)):
         return "rejected"
-    if neg_in and (pos_in <= mean_pos / 1.5 or neg_in >= 1.5 * pos_in):
+    if neg_in and neg_in >= 1.5 * pos_in:
         return "neglected"
     return "accepted"
 
@@ -252,7 +316,7 @@ def compute(conn, criterion_id):
         mutual_pos = sum(1 for j in ids if (i, j) in sel["pos"] and (j, i) in sel["pos"])
         mutual_neg = sum(1 for j in ids if (i, j) in sel["neg"] and (j, i) in sel["neg"])
         row = dict(
-            id=i, name=m["name"],
+            id=i, name=m["name"], has_photo=m["has_photo"],
             pos_in=pos_in, neg_in=neg_in, pos_out=pos_out, neg_out=neg_out,
             mutual_pos=mutual_pos, mutual_neg=mutual_neg,
             status_pos=r3(pos_in / d), status_neg=r3(neg_in / d),
@@ -325,7 +389,9 @@ def compute(conn, criterion_id):
     return dict(study=dict(id=sid, name=study["name"], perceptual=study["perceptual"]),
                 criterion=crit, members=rows, group=group, edges=edges,
                 pairs=dict(mutual_pos=positive_pairs, mutual_neg=negative_pairs,
-                           paradoxical=[list(p) for p in paradoxical_pairs]))
+                           paradoxical=[list(p) for p in paradoxical_pairs]),
+                layouts={key: get_graph_layout(conn, criterion_id, key)
+                         for key in ("force", "target", "mutual")})
 
 
 CAT_RU = dict(star="Звезда", preferred="Предпочитаемый", accepted="Принятый",
@@ -589,29 +655,57 @@ def export_study(conn, sid):
     st = get_study(conn, sid)
     idx = {m["id"]: k for k, m in enumerate(st["members"])}
     cidx = {c["id"]: k for k, c in enumerate(st["criteria"])}
-    return dict(format="opensociometry/2", name=st["name"], description=st["description"],
+    photos = [[idx[r["member_id"]], r["mime"], base64.b64encode(r["data"]).decode("ascii")]
+              for r in conn.execute("SELECT p.* FROM member_photos p JOIN members m ON m.id=p.member_id"
+                                    " WHERE m.study_id=?", (sid,))]
+    layouts = []
+    for r in conn.execute("SELECT l.* FROM graph_layouts l JOIN criteria c ON c.id=l.criterion_id"
+                          " WHERE c.study_id=?", (sid,)):
+        positions = {str(idx[int(mid)]): point for mid, point in json.loads(r["positions"]).items()}
+        layouts.append([cidx[r["criterion_id"]], r["graph_key"], positions])
+    return dict(format="opensociometry/3", name=st["name"], description=st["description"],
                 max_pos=st["max_pos"], max_neg=st["max_neg"], perceptual=st["perceptual"],
                 optimistic=st["optimistic"],
                 members=[m["name"] for m in st["members"]],
                 criteria=[c["name"] for c in st["criteria"]],
                 choices=[[cidx[c["criterion_id"]], idx[c["from_id"]], idx[c["to_id"]], c["kind"]]
                          for c in st["choices"]],
-                filled=[[cidx[q["criterion_id"]], idx[q["member_id"]]] for q in st["filled"]])
+                filled=[[cidx[q["criterion_id"]], idx[q["member_id"]]] for q in st["filled"]],
+                photos=photos, layouts=layouts)
 
 
 def import_study_json(conn, data):
-    if data.get("format") not in ("opensociometry/1", "opensociometry/2", "sociometry-local/1"):
+    if not isinstance(data, dict) or data.get("format") not in (
+            "opensociometry/1", "opensociometry/2", "opensociometry/3", "sociometry-local/1"):
         raise ApiError("Это не файл резервной копии OpenSociometry")
-    sid = create_study(conn, dict(data, criteria=data["criteria"] or ["Критерий"],
-                                  members=data["members"]))
-    st = get_study(conn, sid)
-    mids = [m["id"] for m in st["members"]]
-    cids = [c["id"] for c in st["criteria"]]
-    for ci, a, b, kind in data["choices"]:
-        conn.execute("INSERT OR IGNORE INTO choices VALUES(?,?,?,?)", (cids[ci], mids[a], mids[b], kind))
-    for ci, member in data.get("filled", []):
-        set_questionnaire_filled(conn, cids[ci], mids[member], True)
-    return sid
+    conn.execute("SAVEPOINT restore_study")
+    try:
+        sid = create_study(conn, dict(data, criteria=data["criteria"] or ["Критерий"],
+                                      members=data["members"]))
+        st = get_study(conn, sid)
+        mids = [m["id"] for m in st["members"]]
+        cids = [c["id"] for c in st["criteria"]]
+        for ci, a, b, kind in data["choices"]:
+            if kind not in KINDS or a == b:
+                raise ApiError("Неверный выбор в резервной копии")
+            conn.execute("INSERT OR IGNORE INTO choices VALUES(?,?,?,?)", (cids[ci], mids[a], mids[b], kind))
+        for ci, member in data.get("filled", []):
+            set_questionnaire_filled(conn, cids[ci], mids[member], True)
+        for member, _mime, encoded in data.get("photos", []):
+            raw = base64.b64decode(encoded, validate=True)
+            set_member_photo(conn, mids[member], raw)
+        for ci, key, positions in data.get("layouts", []):
+            remapped = {str(mids[int(member)]): point for member, point in positions.items()}
+            save_graph_layout(conn, cids[ci], key, remapped)
+        conn.execute("RELEASE SAVEPOINT restore_study")
+        return sid
+    except (ApiError, IndexError, KeyError, ValueError, TypeError, AttributeError,
+            binascii.Error, sqlite3.IntegrityError) as e:
+        conn.execute("ROLLBACK TO SAVEPOINT restore_study")
+        conn.execute("RELEASE SAVEPOINT restore_study")
+        if isinstance(e, ApiError):
+            raise
+        raise ApiError("Повреждённая резервная копия") from e
 
 
 def clone_study(conn, sid):
@@ -627,7 +721,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OpenSociometry/1.0"
+    server_version = "OpenSociometry/0.1.0"
 
     def log_message(self, fmt, *args):
         pass
@@ -652,6 +746,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
+        if n > 30 * 1024 * 1024:
+            raise ApiError("Файл слишком большой (максимум 30 МБ)", 413)
         return self.rfile.read(n) if n else b""
 
     def json_body(self):
@@ -693,7 +789,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             path = "/index.html"
         full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
-        if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
+        if os.path.commonpath((STATIC_DIR, full)) != STATIC_DIR or not os.path.isfile(full):
             full = os.path.join(STATIC_DIR, "index.html")
         with open(full, "rb") as f:
             self.send_file(f.read(), MIME.get(os.path.splitext(full)[1], "application/octet-stream"))
@@ -760,6 +856,24 @@ class Handler(BaseHTTPRequestHandler):
                 data = export_study(conn, sid)
                 body = json.dumps(data, ensure_ascii=False, indent=1).encode()
                 return self.send_file(body, "application/json", "%s.opensociometry.json" % safe_name(data["name"]))
+        if len(p) == 3 and p[0] == "members" and p[2] == "photo":
+            mid = int(p[1])
+            if method == "GET":
+                mime, raw = get_member_photo(conn, mid)
+                return self.send_file(raw, mime)
+            if method == "POST":
+                _, files = parse_multipart(self.headers.get("Content-Type"), self.body())
+                if "file" not in files:
+                    raise ApiError("Фото не выбрано")
+                set_member_photo(conn, mid, files["file"][1])
+                return self.send_json({"ok": True})
+            if method == "DELETE":
+                member = conn.execute("SELECT study_id FROM members WHERE id=?", (mid,)).fetchone()
+                if not member:
+                    raise ApiError("Участник не найден", 404)
+                conn.execute("DELETE FROM member_photos WHERE member_id=?", (mid,))
+                touch(conn, member["study_id"])
+                return self.send_json({"ok": True})
         if len(p) == 2 and p[0] == "members":
             mid = int(p[1])
             r = conn.execute("SELECT study_id FROM members WHERE id=?", (mid,)).fetchone()
@@ -787,6 +901,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM choices WHERE criterion_id=?", (cid,))
                 touch(conn, sid)
                 return self.send_json({"ok": True})
+            if len(p) == 4 and p[2] == "layout":
+                if method == "GET":
+                    return self.send_json(get_graph_layout(conn, cid, p[3]))
+                if method == "POST":
+                    save_graph_layout(conn, cid, p[3], self.json_body())
+                    return self.send_json({"ok": True})
             if p[2:] == ["results"] and method == "GET":
                 return self.send_json(compute(conn, cid))
             if p[2:] == ["results.csv"] and method == "GET":

@@ -54,6 +54,7 @@ label { color: var(--muted); font-size: 13px; }
 .list { list-style: none; padding: 0; margin: 0; }
 .list li { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #eef1ef; }
 .list li input { flex: 1; border-color: transparent; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; border: 1px solid var(--line); }
 .list li input:hover, .list li input:focus { border-color: var(--line); }
 .num { color: var(--muted); width: 26px; text-align: right; font-size: 13px; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }

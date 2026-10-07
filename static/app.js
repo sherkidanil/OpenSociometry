@@ -232,6 +232,9 @@ function renderSetup(el) {
           <h2 style="margin-top:0">Участники <span class="muted">(${S.members.length})</span></h2>
           <ol class="list">${S.members.map((m, i) => `
             <li><span class="num">${i + 1}</span><input type="text" value="${esc(m.name)}" data-mid="${m.id}">
+            ${m.has_photo ? `<img class="avatar" src="/api/members/${m.id}/photo" alt="">
+              <button class="link" data-remove-photo="${m.id}" title="Удалить фото">убрать фото</button>` : ""}
+            <button class="link" data-photo="${m.id}" title="Загрузить фото">${m.has_photo ? "сменить фото" : "добавить фото"}</button>
             <button class="link" data-del-m="${m.id}" title="Удалить">✕</button></li>`).join("")}</ol>
           <h3>Добавить участников</h3>
           <textarea id="add-m" placeholder="По одному на строку"></textarea>
@@ -282,6 +285,17 @@ function renderSetup(el) {
   $$("[data-mid]", el).forEach((inp) => (inp.onchange = async () => {
     await api("PUT", "members/" + inp.dataset.mid, { name: inp.value });
     toast("Сохранено");
+  }));
+  $$("[data-photo]", el).forEach((button) => (button.onclick = async () => {
+    const file = await pickFile("image/png,image/jpeg,image/webp");
+    if (!file) return;
+    const fd = new FormData(); fd.append("file", file);
+    await api("POST", `members/${button.dataset.photo}/photo`, fd);
+    await reloadStudy(); renderSetup(el);
+  }));
+  $$("[data-remove-photo]", el).forEach((button) => (button.onclick = async () => {
+    await api("DELETE", `members/${button.dataset.removePhoto}/photo`);
+    await reloadStudy(); renderSetup(el);
   }));
   $$("[data-cid]", el).forEach((inp) => (inp.onchange = async () => {
     await api("PUT", "criteria/" + inp.dataset.cid, { name: inp.value });
@@ -671,6 +685,7 @@ class Graph {
   constructor(box, R, layout, ref, initialShow = {}) {
     this.box = box; this.R = R; this.layout = layout;
     this.show = { pos: true, neg: true, mutualOnly: false, ...initialShow };
+    this.layoutKey = this.show.mutualOnly ? "mutual" : layout;
     this.view = { x: 0, y: 0, k: 1 };
     this.W = 1000; this.H = 620;
     this.nodes = R.members.map((m) => ({ ...m, r: 9 + 4 * Math.sqrt(m.pos_in), x: 0, y: 0, vx: 0, vy: 0 }));
@@ -683,8 +698,14 @@ class Graph {
       this.edges.push({ ...e, mutual, s: this.byId[e.source], t: this.byId[e.target] });
     }
     this.buildDom();
-    if (layout === "force") this.forceLayout();
+    const saved = R.layouts?.[this.layoutKey] || {};
+    if (layout === "force") this.forceLayout(!Object.keys(saved).length);
     else this.targetLayout(ref);
+    for (const n of this.nodes) {
+      const point = saved[String(n.id)];
+      if (point) { n.x = point[0]; n.y = point[1]; n.pinned = true; }
+    }
+    this.draw();
     this.fit();
   }
 
@@ -708,6 +729,15 @@ class Graph {
     saveSvg.textContent = "Скачать SVG";
     saveSvg.onclick = () => this.downloadSvg();
     tools.appendChild(saveSvg);
+    const saveLayout = document.createElement("button");
+    saveLayout.textContent = "Сохранить раскладку";
+    saveLayout.onclick = async () => {
+      const positions = Object.fromEntries(this.nodes.map((n) => [String(n.id), [Math.round(n.x), Math.round(n.y)]]));
+      await api("POST", `criteria/${this.R.criterion.id}/layout/${this.layoutKey}`, positions);
+      this.R.layouts[this.layoutKey] = positions;
+      toast("Раскладка сохранена локально");
+    };
+    tools.appendChild(saveLayout);
     if (this.layout === "force") {
       const re = document.createElement("button");
       re.textContent = "Перестроить";
@@ -752,7 +782,17 @@ class Graph {
       const title = svgEl("title");
       title.textContent = `${n.name}\n${CAT[n.category]}\nполучено: +${n.pos_in} / −${n.neg_in}\nотдано: +${n.pos_out} / −${n.neg_out}\nвзаимных «+»: ${n.mutual_pos}`;
       c.appendChild(title);
-      g.appendChild(c); g.appendChild(t);
+      g.appendChild(c);
+      if (n.has_photo) {
+        const clipId = `photo-${n.id}-${uid}`;
+        const clip = svgEl("clipPath", { id: clipId });
+        clip.appendChild(svgEl("circle", { r: n.r - 2 }));
+        defs.appendChild(clip);
+        g.appendChild(svgEl("image", { href: `/api/members/${n.id}/photo`, x: -n.r + 2, y: -n.r + 2,
+          width: 2 * (n.r - 2), height: 2 * (n.r - 2), "clip-path": `url(#${clipId})`,
+          preserveAspectRatio: "xMidYMid slice", "pointer-events": "none" }));
+      }
+      g.appendChild(t);
       this.gNodes.appendChild(g);
       n.el = g;
       g.addEventListener("mouseenter", () => this.highlight(n));
@@ -810,7 +850,7 @@ class Graph {
     this.vp.setAttribute("transform", `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`);
   }
 
-  downloadSvg() {
+  async downloadSvg() {
     const copy = this.svg.cloneNode(true);
     copy.setAttribute("xmlns", SVGNS);
     copy.setAttribute("width", this.W);
@@ -818,6 +858,14 @@ class Graph {
     const style = svgEl("style");
     style.textContent = ".node text{font:12px sans-serif;paint-order:stroke;stroke:white;stroke-width:3px}.node circle{stroke:#15181e;stroke-opacity:.25;stroke-width:1.5}.dim{opacity:.12}";
     copy.prepend(style);
+    for (const picture of copy.querySelectorAll("image")) {
+      const response = await fetch(picture.getAttribute("href"));
+      const blob = await response.blob();
+      const dataUrl = await new Promise((resolve) => {
+        const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsDataURL(blob);
+      });
+      picture.setAttribute("href", dataUrl);
+    }
     const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: "image/svg+xml" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");

@@ -40,9 +40,11 @@ class ResultTests(unittest.TestCase):
     def test_published_status_groups_and_optimistic_option(self):
         self.assertEqual(app.classify_status(0, 0, 4, 2), 'isolated')
         self.assertEqual(app.classify_status(9, 1, 4, 2), 'star')
-        self.assertEqual(app.classify_status(6, 0, 4, 2), 'preferred')
-        self.assertEqual(app.classify_status(1, 2, 4, 2), 'rejected')
+        self.assertEqual(app.classify_status(6, 2, 4, 2), 'preferred')
+        self.assertEqual(app.classify_status(1, 8, 4, 2), 'rejected')
+        self.assertEqual(app.classify_status(1, 2, 4, 2), 'neglected')
         self.assertEqual(app.classify_status(1, 2, 4, 2, optimistic=True), 'neglected')
+        self.assertEqual(app.classify_status(1, 1, 4, 2), 'accepted')
         self.assertEqual(app.classify_status(3, 0, 4, 2, optimistic=True), 'accepted')
 
     def test_no_choices_gives_zero_group_rates(self):
