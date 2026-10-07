@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import urllib.parse
 import urllib.request
 import zipfile
@@ -70,6 +71,9 @@ def upload(asset):
     endpoint = f"https://api.github.com/repos/{repository}/releases/tags/{VERSION}"
     with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers)) as response:
         release = json.load(response)
+    if any(item["name"] == asset.name for item in release["assets"]):
+        print("Already uploaded:", asset.name)
+        return
     upload_url = release["upload_url"].split("{", 1)[0]
     url = upload_url + "?" + urllib.parse.urlencode({"name": asset.name})
     request = urllib.request.Request(url, data=asset.read_bytes(), method="POST",
@@ -83,4 +87,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--slug", required=True)
     args = parser.parse_args()
-    upload(build(args.slug))
+    try:
+        upload(build(args.slug))
+    except Exception:
+        details = traceback.format_exc().replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print("::error::" + details)
+        raise
