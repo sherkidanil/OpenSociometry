@@ -1,4 +1,4 @@
-name: Build portable bundles
+name: Build desktop packages
 
 on:
   push:
@@ -7,10 +7,14 @@ on:
       - app.py
       - static/**
       - vendor/**
+      - macos/**
+      - requirements.txt
       - start.bat
       - start.command
       - README.md
       - .github/build_release.py
+      - .github/workflows/build-bundles.yml
+  workflow_dispatch:
 
 permissions:
   contents: write
