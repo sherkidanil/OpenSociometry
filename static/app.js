@@ -504,7 +504,7 @@ function renderInput(el) {
 // ------------------------------------------------------------------ results tab
 async function renderResults(el) {
   const cid = currentCriterion();
-  if (!cid || !S.members.length) {
+  if (!cid) {
     el.innerHTML = `<div class="panel empty">Нет данных для расчёта. Добавьте участников и критерии на вкладке
       <a href="#/s/${S.id}/setup">«Участники и критерии»</a>.</div>`;
     return;
