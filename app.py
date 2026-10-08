@@ -794,7 +794,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OpenSociometry/0.1.2"
+    server_version = "OpenSociometry/0.1.3"
 
     def log_message(self, fmt, *args):
         pass
@@ -1012,7 +1012,8 @@ def bind_server(start_port):
         try:
             return ThreadingHTTPServer((HOST, candidate), Handler)
         except OSError as exc:
-            if exc.errno not in (errno.EADDRINUSE, 10048) and getattr(exc, "winerror", None) != 10048:
+            if exc.errno not in (errno.EADDRINUSE, errno.EACCES, 10048, 10013) and \
+                    getattr(exc, "winerror", None) not in (10048, 10013):
                 raise
     raise RuntimeError("Не удалось найти свободный порт для OpenSociometry")
 
