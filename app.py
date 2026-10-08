@@ -439,6 +439,53 @@ def results_csv(res):
     return "﻿" + buf.getvalue()  # BOM, чтобы Excel правильно открыл кириллицу
 
 
+def render_status_chart_png(counts):
+    """Render the six status groups as a local, print-ready flat chart."""
+    try:
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+        from matplotlib.patches import Patch
+    except ImportError as exc:
+        raise ApiError("Для графика Matplotlib установите зависимости из requirements.txt", 503) from exc
+
+    labels = (
+        ("star", "Звёзды", "#4f8a10"),
+        ("preferred", "Предпочитаемые", "#b1ec52"),
+        ("accepted", "Принятые", "#aeb5c0"),
+        ("neglected", "Пренебрегаемые", "#eeb56b"),
+        ("rejected", "Отвергаемые", "#e2622f"),
+        ("isolated", "Изолированные", "#dadde3"),
+    )
+    total = sum(counts.get(key, 0) for key, _, _ in labels)
+    fig = Figure(figsize=(10, 5.5), facecolor="white")
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes((0.04, 0.10, 0.50, 0.80))
+    if total:
+        active = [(key, name, color) for key, name, color in labels if counts.get(key, 0)]
+        ax.pie([counts[key] for key, _, _ in active],
+               colors=[color for _, _, color in active], startangle=90, counterclock=False,
+               wedgeprops={"width": 0.36, "edgecolor": "white", "linewidth": 2},
+               autopct=lambda share: "%d%%" % round(share) if share >= 5 else "",
+               pctdistance=0.82, textprops={"color": "#15181e", "fontsize": 11, "weight": "bold"})
+        ax.text(0, 0.06, str(total), ha="center", va="center", fontsize=31,
+                fontweight="bold", color="#15181e")
+        ax.text(0, -0.18, "участников", ha="center", va="center", fontsize=12,
+                color="#5f6672")
+    else:
+        ax.text(0, 0, "Нет участников", ha="center", va="center", fontsize=18,
+                color="#5f6672")
+    ax.set_aspect("equal")
+    legend = ["%s — %d чел. (%d%%)" % (name, counts.get(key, 0),
+              round(counts.get(key, 0) / total * 100) if total else 0)
+              for key, name, _ in labels]
+    fig.legend([Patch(facecolor=color) for _, _, color in labels], legend,
+               loc="center left", bbox_to_anchor=(0.57, 0.51), frameon=False,
+               labelspacing=1.3, fontsize=12)
+    out = io.BytesIO()
+    fig.savefig(out, format="png", dpi=300, facecolor="white")
+    return out.getvalue()
+
+
 # ---------------------------------------------------------------- import (CSV / XLSX)
 
 def read_xlsx(raw):
@@ -934,6 +981,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"ok": True})
             if p[2:] == ["results"] and method == "GET":
                 return self.send_json(compute(conn, cid))
+            if p[2:] == ["status-chart.png"] and method == "GET":
+                res = compute(conn, cid)
+                body = render_status_chart_png(res["group"]["categories"])
+                filename = ("%s - статусы.png" % safe_name(res["study"]["name"])) if query.get("download") else None
+                return self.send_file(body, "image/png", filename)
             if p[2:] == ["results.csv"] and method == "GET":
                 res = compute(conn, cid)
                 body = results_csv(res).encode("utf-8")
