@@ -1,4 +1,4 @@
-# OpenSociometry 0.1.2
+# OpenSociometry 0.1.3
 
 Локальная программа для социометрии
 
@@ -12,14 +12,14 @@ OpenSociometry — программа для проведения и обраб�
 
 ## Установка и запуск на Windows
 
-1. Скачайте `OpenSociometry-v0.1.2-windows-x64.zip` со страницы релиза и распакуйте в любую папку, например в «Документы».
+1. Скачайте `OpenSociometry-v0.1.3-windows-x64.zip` со страницы релиза и распакуйте в любую папку, например в «Документы».
    Для архива с исходным кодом сначала установите Python с https://www.python.org/downloads/ и отметьте «Add Python to PATH».
 2. Дважды щёлкните файл **`start.bat`**. Откроется чёрное окно и браузер со страницей программы.
 3. Пока работаете, не закрывайте чёрное окно. Закрыли окно — программа остановилась.
 
 ## Установка и запуск на macOS
 
-1. Скачайте со страницы релиза архив `OpenSociometry-v0.1.2-macos-arm64.zip` для Mac с Apple Silicon или `OpenSociometry-v0.1.2-macos-intel.zip` для Mac с Intel.
+1. Скачайте со страницы релиза архив `OpenSociometry-v0.1.3-macos-arm64.zip` для Mac с Apple Silicon или `OpenSociometry-v0.1.3-macos-intel.zip` для Mac с Intel.
    Для архива с исходным кодом сначала установите Python с https://www.python.org/downloads/.
 2. Распакуйте архив в любую папку.
 3. Дважды щёлкните **`start.command`**. Если macOS пишет, что файл от неизвестного разработчика, щёлкните по нему

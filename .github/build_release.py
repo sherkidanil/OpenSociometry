@@ -15,7 +15,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "v0.1.2"
+VERSION = "v0.1.3"
 
 
 def build(slug):
@@ -66,7 +66,7 @@ def build(slug):
             if proc.poll() is None:
                 proc.terminate()
                 proc.wait(timeout=10)
-    staging = ROOT / "release-stage" / "OpenSociometry-0.1.2"
+    staging = ROOT / "release-stage" / "OpenSociometry-0.1.3"
     staging.mkdir(parents=True, exist_ok=True)
     shutil.copytree(bundle, staging / "OpenSociometry", dirs_exist_ok=True)
     shutil.copy2(ROOT / "README.md", staging / "README.md")

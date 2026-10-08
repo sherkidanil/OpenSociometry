@@ -57,7 +57,13 @@ class RuntimePathsTests(unittest.TestCase):
             occupied = socket.socket()
             occupied.bind(('127.0.0.1', 0))
             port = occupied.getsockname()[1]
-            if port < 65000:
+            try:
+                with socket.socket() as next_port:
+                    next_port.bind(('127.0.0.1', port + 1))
+                adjacent_is_free = True
+            except OSError:
+                adjacent_is_free = False
+            if port < 65000 and adjacent_is_free:
                 break
             occupied.close()
         try:
@@ -70,6 +76,14 @@ class RuntimePathsTests(unittest.TestCase):
                 server.server_close()
         finally:
             occupied.close()
+
+    def test_reserved_windows_port_is_skipped(self):
+        denied = PermissionError(13, 'Port reserved')
+        denied.winerror = 10013
+        next_server = object()
+        with patch.object(app, 'ThreadingHTTPServer', side_effect=[denied, next_server]) as factory:
+            self.assertIs(app.bind_server(8765), next_server)
+        self.assertEqual(factory.call_count, 2)
 
 
 if __name__ == '__main__':
