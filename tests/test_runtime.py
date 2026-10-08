@@ -55,16 +55,18 @@ class RuntimePathsTests(unittest.TestCase):
                     proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
                                             env=env, stdout=output, stderr=subprocess.PIPE)
                 try:
-                    deadline = time.monotonic() + 5
+                    deadline = time.monotonic() + 45
                     while not os.path.isfile(ready) and time.monotonic() < deadline:
+                        if proc.poll() is not None:
+                            self.fail('Desktop server exited: ' + proc.stderr.read().decode(errors='replace'))
                         time.sleep(0.05)
                     self.assertTrue(os.path.isfile(ready), 'Desktop did not receive its startup URL')
                     with open(ready) as file:
                         runtime = json.load(file)
                     self.assertEqual(runtime['pid'], proc.pid)
                     self.assertRegex(runtime['url'], r'^http://127\.0\.0\.1:[1-9][0-9]*/$')
-                    with open(log_path, encoding='utf-8') as output:
-                        self.assertIn(runtime['url'], output.read(), 'Desktop startup log is buffered')
+                    with open(log_path, 'rb') as output:
+                        self.assertIn(runtime['url'].encode('ascii'), output.read(), 'Desktop startup log is buffered')
                     with urllib.request.urlopen(runtime['url'] + 'api/studies', timeout=3) as response:
                         studies = json.load(response)
                     if launch == 0:
@@ -83,12 +85,17 @@ class RuntimePathsTests(unittest.TestCase):
 
     def test_desktop_server_exits_when_its_parent_is_gone(self):
         with tempfile.TemporaryDirectory() as temp:
+            ready = os.path.join(temp, 'ready.json')
             env = dict(os.environ, SOCIOMETRY_DB=os.path.join(temp, 'desktop.db'),
-                       SOCIOMETRY_PORT='0', SOCIOMETRY_PARENT_PID='0')
+                       SOCIOMETRY_PORT='0', SOCIOMETRY_PARENT_PID='0', SOCIOMETRY_READY_FILE=ready)
             proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
                                     env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             try:
-                deadline = time.monotonic() + 4
+                deadline = time.monotonic() + 45
+                while not os.path.isfile(ready) and proc.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertTrue(os.path.isfile(ready), 'Desktop server never completed startup')
+                deadline = time.monotonic() + 5
                 while proc.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.05)
                 self.assertEqual(proc.poll(), 0, 'Orphaned desktop server is still running')

@@ -191,9 +191,12 @@ def upload(asset):
     repository = os.environ["GITHUB_REPOSITORY"]
     headers = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
                "User-Agent": "OpenSociometry-release"}
-    endpoint = f"https://api.github.com/repos/{repository}/releases/tags/{VERSION}"
+    # The tag endpoint exposes published releases; the authenticated list includes drafts.
+    endpoint = f"https://api.github.com/repos/{repository}/releases?per_page=100"
     with urllib.request.urlopen(urllib.request.Request(endpoint, headers=headers)) as response:
-        release = json.load(response)
+        release = next((item for item in json.load(response) if item["tag_name"] == VERSION), None)
+    if release is None:
+        raise RuntimeError("Create the release draft before uploading packages: " + VERSION)
     existing = next((item for item in release["assets"] if item["name"] == asset.name), None)
     if existing:
         request = urllib.request.Request(existing["url"], method="DELETE", headers=headers)
