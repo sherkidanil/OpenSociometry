@@ -52,6 +52,43 @@ class RuntimePathsTests(unittest.TestCase):
                     proc.terminate()
                 proc.communicate(timeout=5)
 
+    def test_occupied_port_starts_current_app_on_next_port(self):
+        while True:
+            occupied = socket.socket()
+            occupied.bind(('127.0.0.1', 0))
+            port = occupied.getsockname()[1]
+            if port < 65000:
+                break
+            occupied.close()
+        try:
+            occupied.listen()
+            with tempfile.TemporaryDirectory() as temp:
+                env = os.environ.copy()
+                env['SOCIOMETRY_DB'] = os.path.join(temp, 'study.db')
+                env['SOCIOMETRY_PORT'] = str(port)
+                proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
+                                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                try:
+                    for _ in range(60):
+                        try:
+                            with urllib.request.urlopen('http://127.0.0.1:%d/api/studies' % (port + 1),
+                                                        timeout=0.2) as response:
+                                self.assertEqual(json.load(response), [])
+                                self.assertTrue(response.headers['Server'].startswith('OpenSociometry/'))
+                                break
+                        except Exception:
+                            if proc.poll() is not None:
+                                self.fail('Current app exited instead of selecting the next port')
+                            time.sleep(0.1)
+                    else:
+                        self.fail('Current app did not start on the next port')
+                finally:
+                    if proc.poll() is None:
+                        proc.terminate()
+                    proc.communicate(timeout=5)
+        finally:
+            occupied.close()
+
 
 if __name__ == '__main__':
     unittest.main()

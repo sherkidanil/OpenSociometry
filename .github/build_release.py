@@ -15,7 +15,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "v0.1.0"
+VERSION = "v0.1.1"
 
 
 def build(slug):
@@ -48,11 +48,25 @@ def build(slug):
                                    (proc.returncode, stderr.decode(errors="replace")[-3000:]))
             if not Path(env["SOCIOMETRY_DB"]).is_file():
                 raise RuntimeError("Bundled application did not create its local database")
+            with urllib.request.urlopen("http://127.0.0.1:9879/vendor/plotly.min.js", timeout=10) as response:
+                if int(response.headers.get("Content-Length", "0")) < 1000000:
+                    raise RuntimeError("Bundled Plotly asset is missing or incomplete")
+            data = json.dumps({"name": "Smoke", "members": ["Alpha", "Beta"]}).encode()
+            request = urllib.request.Request("http://127.0.0.1:9879/api/studies", data=data,
+                                             headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(request, timeout=10) as response:
+                study_id = json.load(response)["id"]
+            with urllib.request.urlopen("http://127.0.0.1:9879/api/studies/%d" % study_id, timeout=10) as response:
+                criterion_id = json.load(response)["criteria"][0]["id"]
+            with urllib.request.urlopen("http://127.0.0.1:9879/api/criteria/%d/status-chart.png" % criterion_id,
+                                        timeout=30) as response:
+                if response.headers.get_content_type() != "image/png" or not response.read(8).startswith(b"\x89PNG"):
+                    raise RuntimeError("Bundled Matplotlib chart failed")
         finally:
             if proc.poll() is None:
                 proc.terminate()
                 proc.wait(timeout=10)
-    staging = ROOT / "release-stage" / "OpenSociometry-0.1.0"
+    staging = ROOT / "release-stage" / "OpenSociometry-0.1.1"
     staging.mkdir(parents=True, exist_ok=True)
     shutil.copytree(bundle, staging / "OpenSociometry", dirs_exist_ok=True)
     shutil.copy2(ROOT / "README.md", staging / "README.md")

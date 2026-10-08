@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """OpenSociometry — локальная программа для социометрии.
 
-Запуск: python app.py  (нужен только Python 3.8+, сторонние пакеты не требуются)
+Запуск из исходников: pip install -r requirements.txt && python app.py (Python 3.9+)
 Откроется браузер на http://127.0.0.1:8765
 Все данные хранятся в файле data/sociometry.db рядом с этим скриптом.
 """
 import csv
 import base64
 import binascii
+import errno
 import io
 import json
 import math
@@ -793,7 +794,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OpenSociometry/0.1.0"
+    server_version = "OpenSociometry/0.1.1"
 
     def log_message(self, fmt, *args):
         pass
@@ -1010,14 +1011,21 @@ def main():
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="backslashreplace")
     init_db()
-    try:
-        server = ThreadingHTTPServer((HOST, PORT), Handler)
-    except OSError:
-        url = "http://%s:%d/" % (HOST, PORT)
-        print("Порт %d занят — похоже, приложение уже запущено. Открываю %s" % (PORT, url))
-        webbrowser.open(url)
-        return
-    url = "http://%s:%d/" % (HOST, PORT)
+    server = None
+    selected_port = PORT
+    for candidate in range(PORT, min(PORT + 20, 65536)):
+        try:
+            server = ThreadingHTTPServer((HOST, candidate), Handler)
+            selected_port = candidate
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    if server is None:
+        raise RuntimeError("Не удалось найти свободный порт для OpenSociometry")
+    url = "http://%s:%d/" % (HOST, selected_port)
+    if selected_port != PORT:
+        print("Порт %d занят; эта копия приложения запущена на порту %d." % (PORT, selected_port))
     print("OpenSociometry запущена: %s" % url)
     print("База данных: %s" % DB_PATH)
     print("Чтобы остановить — закройте это окно или нажмите Ctrl+C.")
