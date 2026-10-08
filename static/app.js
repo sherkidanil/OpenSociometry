@@ -13,6 +13,9 @@ const CAT = {
 };
 const CAT_COLOR = { star: "#4f8a10", preferred: "#b1ec52", accepted: "#aeb5c0", neglected: "#eeb56b", isolated: "#dadde3", rejected: "#e2622f" };
 const DARK_TEXT = new Set(["preferred", "neglected", "isolated"]);
+const STATUS_KEYS = ["star", "preferred", "accepted", "neglected", "rejected", "isolated"];
+const CAT_PLURAL = { star: "Звёзды", preferred: "Предпочитаемые", accepted: "Принятые",
+  neglected: "Пренебрегаемые", rejected: "Отвергаемые", isolated: "Изолированные" };
 
 function store(key, val) {
   try {
@@ -544,6 +547,27 @@ async function renderResults(el) {
         ${S.optimistic ? "Включён оптимистичный расчёт статусов." : ""}</div>
     </div>
 
+    <h2>Статусы в группе</h2>
+    <div class="panel status-chart-panel" id="status-chart-panel">
+      <div class="row status-chart-head no-print">
+        <div class="grow muted small">Распределение участников по статусным группам</div>
+        <label class="chart-choice"><input type="checkbox" id="chart-plotly" aria-controls="status-chart-plotly"> Plotly</label>
+        <label class="chart-choice"><input type="checkbox" id="chart-matplotlib" aria-controls="status-chart-matplotlib"> Matplotlib</label>
+      </div>
+      <div id="status-chart-plotly" class="status-chart-canvas"></div>
+      <div id="status-chart-matplotlib" class="status-chart-canvas" hidden>
+        <img id="status-chart-image" alt="Плоская диаграмма статусов в группе">
+        <div class="muted small" id="status-chart-image-error" hidden>Не удалось построить график Matplotlib. Установите зависимости из requirements.txt.</div>
+      </div>
+      <div class="row status-chart-download no-print">
+        <button id="chart-download-svg">Скачать SVG</button>
+        <button id="chart-download-plotly-png">Скачать PNG · 2400 × 1800 · 300 DPI</button>
+        <a class="btn" id="chart-download-mpl" href="/api/criteria/${cid}/status-chart.png?download=1" hidden>Скачать PNG · 300 DPI</a>
+      </div>
+      <div class="status-chart-groups" id="status-chart-groups"></div>
+      <div class="status-chart-members muted small" id="status-chart-members" aria-live="polite">Нажмите на сектор или категорию, чтобы увидеть участников.</div>
+    </div>
+
     <h2>Взаимные и парадоксальные выборы</h2>
     <div class="panel pair-list">
       ${pairSection("Взаимно-положительные", R.pairs.mutual_pos, byId)}
@@ -591,10 +615,133 @@ async function renderResults(el) {
     <div class="muted small" style="margin-top:4px">Обведённые ячейки — взаимные выборы.</div>
   `;
   bindCritTabs(el, () => renderResults(el));
+  bindStatusChart(R, cid);
   renderIndividual(R);
   const g1 = new Graph($("#g1"), R, "force");
   new Graph($("#g2"), R, "target", g1);
   new Graph($("#g3"), R, "force", null, { mutualOnly: true });
+}
+
+let plotlyLoader;
+function loadPlotly() {
+  if (window.Plotly) return Promise.resolve(window.Plotly);
+  if (!plotlyLoader) plotlyLoader = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/vendor/plotly.min.js";
+    script.onload = () => window.Plotly ? resolve(window.Plotly) : reject(new Error("Plotly не загрузился"));
+    script.onerror = () => reject(new Error("Plotly не загрузился"));
+    document.head.appendChild(script);
+  }).catch((error) => { plotlyLoader = null; throw error; });
+  return plotlyLoader;
+}
+
+function bindStatusChart(R, cid) {
+  const panel = $("#status-chart-panel");
+  const counts = R.group.categories;
+  const total = R.group.n;
+  const members = Object.fromEntries(STATUS_KEYS.map((key) => [key, R.members.filter((m) => m.category === key)]));
+  const groups = $("#status-chart-groups", panel);
+  const details = $("#status-chart-members", panel);
+  const plotlyBox = $("#status-chart-plotly", panel);
+  const mplBox = $("#status-chart-matplotlib", panel);
+  const mplImage = $("#status-chart-image", panel);
+  const plotlyCheck = $("#chart-plotly", panel);
+  const mplCheck = $("#chart-matplotlib", panel);
+  const svgButton = $("#chart-download-svg", panel);
+  const pngButton = $("#chart-download-plotly-png", panel);
+  const mplDownload = $("#chart-download-mpl", panel);
+  let active = "";
+  let plotlyDrawn = false;
+
+  groups.innerHTML = STATUS_KEYS.map((key) => {
+    const count = counts[key] || 0;
+    const share = total ? Math.round(count / total * 100) : 0;
+    return `<button class="status-chart-group" data-category="${key}" type="button" aria-pressed="false">
+      <span class="sw" style="background:${CAT_COLOR[key]}"></span><span>${CAT_PLURAL[key]}</span>
+      <b>${count} · ${share}%</b></button>`;
+  }).join("");
+
+  function selectCategory(key) {
+    $$(".status-chart-group", groups).forEach((button) =>
+      button.setAttribute("aria-pressed", button.dataset.category === key ? "true" : "false"));
+    const names = members[key];
+    details.innerHTML = `<b>${CAT_PLURAL[key]} (${names.length})</b><div>${names.length
+      ? names.map((m) => `<a href="#/s/${S.id}/person/${m.id}">${esc(m.name)}</a>`).join(" · ")
+      : "Участников нет."}</div>`;
+  }
+  $$(".status-chart-group", groups).forEach((button) =>
+    button.onclick = () => selectCategory(button.dataset.category));
+
+  async function drawPlotly() {
+    if (plotlyDrawn) return;
+    try {
+      const Plotly = await loadPlotly();
+      if (!plotlyBox.isConnected) return;
+      const keys = STATUS_KEYS.filter((key) => counts[key] > 0);
+      if (!keys.length) {
+        plotlyBox.innerHTML = `<div class="empty">Пока нет участников для диаграммы.</div>`;
+        return;
+      }
+      await Plotly.newPlot(plotlyBox, [{
+        type: "pie", hole: 0.58, direction: "clockwise",
+        labels: keys.map((key) => CAT_PLURAL[key]), values: keys.map((key) => counts[key]),
+        customdata: keys, marker: { colors: keys.map((key) => CAT_COLOR[key]), line: { color: "#fff", width: 2 } },
+        text: keys.map((key) => `${Math.round(counts[key] / total * 100)}%`),
+        textinfo: "text", textposition: "inside", insidetextfont: { size: 15, color: "#15181e" },
+        hovertemplate: "%{label}: %{value} чел. (%{percent})<extra></extra>", sort: false,
+      }], {
+        paper_bgcolor: "#fff", plot_bgcolor: "#fff", showlegend: false,
+        margin: { l: 16, r: 16, t: 8, b: 8 }, height: 400,
+        font: { family: "Golos Text, Arial, sans-serif", color: "#15181e" },
+        annotations: [{ text: `<b>${total}</b><br>участников`, x: 0.5, y: 0.5,
+          xref: "paper", yref: "paper", showarrow: false, font: { size: 18 } }],
+      }, { responsive: true, displayModeBar: false });
+      plotlyBox.on("plotly_click", (event) => selectCategory(event.points[0].customdata));
+      plotlyDrawn = true;
+    } catch (error) {
+      plotlyBox.innerHTML = `<div class="empty">Не удалось загрузить локальный Plotly.</div>`;
+      toast(error.message);
+    }
+  }
+
+  function activate(renderer) {
+    active = renderer;
+    store("status-chart-renderer", renderer);
+    plotlyCheck.checked = renderer === "plotly";
+    mplCheck.checked = renderer === "matplotlib";
+    plotlyBox.hidden = renderer !== "plotly";
+    mplBox.hidden = renderer !== "matplotlib";
+    svgButton.hidden = pngButton.hidden = renderer !== "plotly";
+    mplDownload.hidden = renderer !== "matplotlib";
+    if (renderer === "plotly") drawPlotly();
+    else if (!mplImage.src) mplImage.src = `/api/criteria/${cid}/status-chart.png`;
+  }
+  plotlyCheck.onchange = () => activate("plotly");
+  mplCheck.onchange = () => activate("matplotlib");
+  mplImage.onerror = () => { $("#status-chart-image-error", panel).hidden = false; };
+  async function downloadPlotly(format) {
+    await drawPlotly();
+    if (!plotlyDrawn) return;
+    const opts = { format, filename: `статусы-${S.id}` };
+    if (format === "png") { opts.width = 2400; opts.height = 1800; }
+    else { opts.width = 1200; opts.height = 900; }
+    try {
+      if (format === "svg") return await window.Plotly.downloadImage(plotlyBox, opts);
+      const dataUrl = await window.Plotly.toImage(plotlyBox, opts);
+      const bytes = new Uint8Array(await (await fetch(dataUrl)).arrayBuffer());
+      const output = setPngDpi(bytes, 300);
+      const url = URL.createObjectURL(new Blob([output], { type: "image/png" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${opts.filename}-300dpi.png`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    }
+    catch (error) { toast("Не удалось сохранить диаграмму: " + error.message); }
+  }
+  svgButton.onclick = () => downloadPlotly("svg");
+  pngButton.onclick = () => downloadPlotly("png");
+  activate(store("status-chart-renderer") === "matplotlib" ? "matplotlib" : "plotly");
 }
 
 function pairSection(title, pairs, byId) {
@@ -1021,6 +1168,9 @@ function renderHelp() {
     <li><b>Смотрите результаты</b>: групповые индексы, статусы участников, социограммы и социоматрицу. Их можно распечатать или сохранить в PDF
       через «Печать», а таблицы выгрузить в CSV для Excel.</li>
   </ol>
+  <p>На вкладке «Результаты» диаграмма «Статусы в группе» показывает доли статусных категорий. Выберите Plotly или Matplotlib
+  через checkbox, затем нажмите сектор или название категории, чтобы увидеть участников. Plotly сохраняет SVG или PNG 300 DPI,
+  Matplotlib — PNG 300 DPI. Все графики строятся на вашем компьютере.</p>
   <h2>Перцептивные выборы</h2>
   <p>Если включить их в настройках, в режиме «Перцептивные» для каждого участника отмечается, кто, по его мнению, выбрал его (п+) или отверг (п−).
   Программа считает, насколько ожидания совпали с реальностью: <i>точность ожиданий</i> (сколько из ожидаемых действительно выбрали)
