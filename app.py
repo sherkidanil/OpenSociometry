@@ -1025,17 +1025,38 @@ def main():
     server = bind_server(PORT)
     selected_port = server.server_port
     url = "http://%s:%d/" % (HOST, selected_port)
-    if selected_port != PORT:
+    if PORT and selected_port != PORT:
         print("Порт %d занят; эта копия приложения запущена на порту %d." % (PORT, selected_port))
     print("OpenSociometry запущена: %s" % url)
     print("База данных: %s" % DB_PATH)
     print("Чтобы остановить — закройте это окно или нажмите Ctrl+C.")
-    if "--no-browser" not in sys.argv:
-        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    stopped = threading.Event()
     try:
+        ready_file = os.environ.get("SOCIOMETRY_READY_FILE")
+        if ready_file:
+            temporary = ready_file + ".%d.tmp" % os.getpid()
+            with open(temporary, "w", encoding="utf-8") as file:
+                json.dump({"url": url, "pid": os.getpid()}, file)
+            os.replace(temporary, ready_file)
+        parent_pid = os.environ.get("SOCIOMETRY_PARENT_PID")
+        if parent_pid is not None:
+            parent_pid = int(parent_pid)
+
+            def watch_parent():
+                while not stopped.wait(0.5):
+                    if os.getppid() != parent_pid:
+                        server.shutdown()
+                        return
+
+            threading.Thread(target=watch_parent, daemon=True).start()
+        if "--no-browser" not in sys.argv:
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nОстановлено.")
+    finally:
+        stopped.set()
+        server.server_close()
 
 
 if __name__ == "__main__":
