@@ -794,21 +794,23 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OpenSociometry/0.1.3"
+    server_version = "OpenSociometry/0.2.0"
 
     def log_message(self, fmt, *args):
         pass
 
     def send_json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        return self.respond(body, "application/json; charset=utf-8", status)
 
     def send_file(self, body, ctype, filename=None):
-        self.send_response(200)
+        return self.respond(body, ctype, filename=filename)
+
+    def respond(self, body, ctype, status=200, filename=None):
+        if getattr(self, "_defer_response", False):
+            self._pending_response = (body, ctype, status, filename)
+            return
+        self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         if filename:
@@ -849,8 +851,15 @@ class Handler(BaseHTTPRequestHandler):
             origin = self.headers.get("Origin")
             if method != "GET" and origin and urlparse(origin).hostname not in ("127.0.0.1", "localhost"):
                 raise ApiError("Запрещено", 403)
-            with db() as conn:
-                return self.api(conn, method, path, parse_qs(url.query))
+            # A successful response must acknowledge an already committed transaction.
+            self._defer_response = True
+            self._pending_response = None
+            try:
+                with db() as conn:
+                    self.api(conn, method, path, parse_qs(url.query))
+            finally:
+                self._defer_response = False
+            return self.respond(*self._pending_response)
         except ApiError as e:
             self.send_json({"error": str(e)}, e.status)
         except (KeyError, ValueError, json.JSONDecodeError) as e:
@@ -1029,7 +1038,7 @@ def main():
         print("Порт %d занят; эта копия приложения запущена на порту %d." % (PORT, selected_port))
     print("OpenSociometry запущена: %s" % url)
     print("База данных: %s" % DB_PATH)
-    print("Чтобы остановить — закройте это окно или нажмите Ctrl+C.")
+    print("Чтобы остановить — закройте это окно или нажмите Ctrl+C.", flush=True)
     stopped = threading.Event()
     try:
         ready_file = os.environ.get("SOCIOMETRY_READY_FILE")

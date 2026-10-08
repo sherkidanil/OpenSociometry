@@ -1,18 +1,46 @@
 import os
 import json
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+import threading
 import unittest
 import urllib.request
+from contextlib import closing
 from unittest.mock import patch
 
 import app
 
 
 class RuntimePathsTests(unittest.TestCase):
+    def test_api_acknowledges_changes_only_after_database_commit(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(app, 'DB_PATH', os.path.join(temp, 'commit.db')):
+            app.init_db()
+            visible_counts = []
+
+            class ObservingHandler(app.Handler):
+                def send_response(self, status, message=None):
+                    if status == 200:
+                        with closing(sqlite3.connect(app.DB_PATH)) as observer:
+                            visible_counts.append(observer.execute('SELECT COUNT(*) FROM studies').fetchone()[0])
+                    super().send_response(status, message)
+
+            server = app.ThreadingHTTPServer(('127.0.0.1', 0), ObservingHandler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                request = urllib.request.Request('http://127.0.0.1:%d/api/studies' % server.server_port,
+                    data=json.dumps({'name': 'Durable acknowledgement', 'members': ['Alpha']}).encode(),
+                    headers={'Content-Type': 'application/json'}, method='POST')
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    self.assertGreater(json.load(response)['id'], 0)
+                self.assertEqual(visible_counts, [1], 'Success response was sent before the data committed')
+            finally:
+                server.shutdown()
+                server.server_close()
+
     def test_desktop_ready_url_and_data_survive_restart(self):
         with tempfile.TemporaryDirectory() as temp:
             ready = os.path.join(temp, 'ready.json')
@@ -21,8 +49,11 @@ class RuntimePathsTests(unittest.TestCase):
             for launch in range(2):
                 if os.path.exists(ready):
                     os.unlink(ready)
-                proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
-                                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                env.pop('PYTHONUNBUFFERED', None)
+                log_path = os.path.join(temp, 'server.log')
+                with open(log_path, 'wb') as output:
+                    proc = subprocess.Popen([sys.executable, os.path.abspath(app.__file__), '--no-browser'],
+                                            env=env, stdout=output, stderr=subprocess.PIPE)
                 try:
                     deadline = time.monotonic() + 5
                     while not os.path.isfile(ready) and time.monotonic() < deadline:
@@ -32,6 +63,8 @@ class RuntimePathsTests(unittest.TestCase):
                         runtime = json.load(file)
                     self.assertEqual(runtime['pid'], proc.pid)
                     self.assertRegex(runtime['url'], r'^http://127\.0\.0\.1:[1-9][0-9]*/$')
+                    with open(log_path, encoding='utf-8') as output:
+                        self.assertIn(runtime['url'], output.read(), 'Desktop startup log is buffered')
                     with urllib.request.urlopen(runtime['url'] + 'api/studies', timeout=3) as response:
                         studies = json.load(response)
                     if launch == 0:
