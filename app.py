@@ -794,7 +794,7 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "application/javascript; cha
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OpenSociometry/0.1.1"
+    server_version = "OpenSociometry/0.1.2"
 
     def log_message(self, fmt, *args):
         pass
@@ -1007,22 +1007,22 @@ def safe_name(s):
     return re.sub(r'[\\/:*?"<>|]+', "_", s).strip() or "sociometry"
 
 
+def bind_server(start_port):
+    for candidate in range(start_port, min(start_port + 20, 65536)):
+        try:
+            return ThreadingHTTPServer((HOST, candidate), Handler)
+        except OSError as exc:
+            if exc.errno not in (errno.EADDRINUSE, 10048) and getattr(exc, "winerror", None) != 10048:
+                raise
+    raise RuntimeError("Не удалось найти свободный порт для OpenSociometry")
+
+
 def main():
     if sys.stdout is not None and hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="backslashreplace")
     init_db()
-    server = None
-    selected_port = PORT
-    for candidate in range(PORT, min(PORT + 20, 65536)):
-        try:
-            server = ThreadingHTTPServer((HOST, candidate), Handler)
-            selected_port = candidate
-            break
-        except OSError as exc:
-            if exc.errno != errno.EADDRINUSE:
-                raise
-    if server is None:
-        raise RuntimeError("Не удалось найти свободный порт для OpenSociometry")
+    server = bind_server(PORT)
+    selected_port = server.server_port
     url = "http://%s:%d/" % (HOST, selected_port)
     if selected_port != PORT:
         print("Порт %d занят; эта копия приложения запущена на порту %d." % (PORT, selected_port))
